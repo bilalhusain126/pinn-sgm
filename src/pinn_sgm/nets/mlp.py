@@ -2,10 +2,6 @@
 Multi-Layer Perceptron architectures for PINN solvers.
 
 Implements standard MLP and specialized DensityMLP for probability density approximation.
-
-References:
-    - PhD Research Document: Section 2.2.2 (Neural Network Approximation)
-    - PhD Research Document: Section 3.3 (PINN Solver for the Density Field)
 """
 
 from typing import List, Literal, Optional
@@ -29,7 +25,6 @@ def _get_activation(name: str) -> nn.Module:
     name = name.lower()
     activations = {
         'silu': nn.SiLU(),
-        'swish': nn.SiLU(),  # SiLU and Swish are equivalent
         'relu': nn.ReLU(),
         'tanh': nn.Tanh(),
         'sigmoid': nn.Sigmoid(),
@@ -63,9 +58,6 @@ class MLP(nn.Module):
         hidden_dims: List of hidden layer dimensions (e.g., [64, 64, 64])
         activation: Activation function name (default: 'SiLU')
         output_activation: Optional activation for output layer
-
-    References:
-        - PhD Research Document: Equation (2.6)
     """
 
     def __init__(
@@ -155,42 +147,39 @@ class DensityMLP(nn.Module):
     This network enforces non-negativity by applying a Softplus activation
     at the output layer:
         p(x, t) = log(1 + exp(z))
-
     where z is the pre-activation output. This ensures p(x, t) > 0 everywhere,
     a critical requirement for probability densities.
 
+    Supports multi-dimensional spatial inputs for multi-factor models:
+        - 1D: Merton model (single asset)
+        - 2D: Heston model (asset + volatility), two-asset portfolios
+        - ND: Multi-asset portfolios, multi-factor interest rate models
+
     Args:
-        input_dim: Dimension of input (typically 2 for (x, t))
+        spatial_dim: Dimension of spatial variable x (default: 1)
         hidden_dims: List of hidden layer dimensions
         activation: Activation function for hidden layers (default: 'tanh')
         use_softplus: If True, apply Softplus; if False, use exp (default: True)
-
-    Notes:
-        - Softplus is preferred over exp to avoid numerical overflow
-        - For very small outputs, Softplus(z) ≈ exp(z)
-        - For large outputs, Softplus(z) ≈ z (linear growth prevents explosion)
-
-    References:
-        - PhD Research Document: Section 3.3 (PINN Solver for the Density Field)
     """
 
     def __init__(
         self,
-        input_dim: int = 2,
+        spatial_dim: int = 1,
         hidden_dims: List[int] = [64, 64, 64],
         activation: str = 'tanh',
         use_softplus: bool = True
     ):
         super().__init__()
 
-        self.input_dim = input_dim
+        self.spatial_dim = spatial_dim
+        self.input_dim = spatial_dim + 1  # x (d-dim) + t (1-dim)
         self.hidden_dims = hidden_dims
         self.activation_name = activation
         self.use_softplus = use_softplus
 
         # Build hidden layers
         layers = []
-        in_dim = input_dim
+        in_dim = self.input_dim
 
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(in_dim, hidden_dim))
@@ -224,20 +213,30 @@ class DensityMLP(nn.Module):
         Compute probability density p(x, t).
 
         Args:
-            x: Spatial coordinates of shape [Batch, 1] or [Batch]
+            x: Spatial coordinates of shape [Batch, spatial_dim] or [Batch] (if spatial_dim=1)
             t: Temporal coordinates of shape [Batch, 1] or [Batch]
 
         Returns:
             Density values of shape [Batch, 1], guaranteed positive
         """
         # Ensure proper shapes
-        if x.dim() == 1:
-            x = x.unsqueeze(-1)
+        if self.spatial_dim == 1:
+            # For 1D, accept both [Batch] and [Batch, 1]
+            if x.dim() == 1:
+                x = x.unsqueeze(-1)
+        else:
+            # For multi-D, x should already be [Batch, spatial_dim]
+            if x.dim() == 1:
+                raise ValueError(
+                    f"For spatial_dim={self.spatial_dim}, x must be [Batch, {self.spatial_dim}], "
+                    f"got shape {x.shape}"
+                )
+
         if t.dim() == 1:
             t = t.unsqueeze(-1)
 
         # Concatenate inputs: [x, t]
-        inputs = torch.cat([x, t], dim=-1)  # [Batch, 2]
+        inputs = torch.cat([x, t], dim=-1)  # [Batch, spatial_dim + 1]
 
         # Forward through hidden network
         z = self.hidden_network(inputs)  # [Batch, 1]
@@ -253,7 +252,7 @@ class DensityMLP(nn.Module):
         dims_str = " → ".join(map(str, dims))
         activation_str = f", activation={self.activation_name}"
         output_str = "Softplus" if self.use_softplus else "Exp"
-        return f"DensityMLP({dims_str}{activation_str}, output={output_str})"
+        return f"DensityMLP({dims_str}{activation_str}, output={output_str}, spatial_dim={self.spatial_dim})"
 
 
 class ScoreNetwork(nn.Module):
@@ -271,10 +270,6 @@ class ScoreNetwork(nn.Module):
         hidden_dims: List of hidden layer dimensions
         time_embedding_dim: Dimension for time encoding (0 to disable)
         activation: Activation function name
-
-    References:
-        - PhD Research Document: Equation (2.12)
-        - PhD Research Document: Section 2.3.1 (The Score Function)
     """
 
     def __init__(

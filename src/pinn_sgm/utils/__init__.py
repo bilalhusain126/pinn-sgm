@@ -6,7 +6,12 @@ and integration with diffusion models.
 """
 
 from .score_extraction import ScoreExtractor, hybrid_score
-from .visualizations import plot_density_evolution, plot_score_field, plot_training_history
+from .visualizations import (
+    plot_density_evolution,
+    plot_score_field,
+    plot_training_history,
+    plot_error_analysis
+)
 
 __all__ = [
     'ScoreExtractor',
@@ -14,4 +19,5 @@ __all__ = [
     'plot_density_evolution',
     'plot_score_field',
     'plot_training_history',
+    'plot_error_analysis',
 ]

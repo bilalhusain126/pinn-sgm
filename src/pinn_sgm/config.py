@@ -5,8 +5,6 @@ This module defines configuration objects using Python dataclasses with
 post-initialization validation to ensure parameter consistency.
 
 References:
-    - PhD Research Document: Section 2.2.4 (Collocation Points and Optimization)
-    - PhD Research Document: Section 3.3 (PINN Solver for the Density Field)
 """
 
 from dataclasses import dataclass
@@ -23,8 +21,10 @@ class TrainingConfig:
         batch_size: Number of collocation points per training batch
         epochs: Maximum number of training epochs
         learning_rate: Initial learning rate for optimizer
-        lr_decay_step: Number of epochs between learning rate decay
-        lr_decay_rate: Multiplicative factor for learning rate decay (gamma)
+        lr_scheduler: LR scheduler type ('step' or 'plateau')
+        lr_decay_step: Number of epochs between LR decay (for 'step' scheduler)
+        lr_decay_rate: Multiplicative factor for LR decay (gamma)
+        lr_patience: Epochs to wait before reducing LR (for 'plateau' scheduler)
         optimizer: Optimizer type ('adam' or 'lbfgs')
         gradient_clip_val: Maximum gradient norm (None to disable clipping)
         verbose: If True, print training progress
@@ -33,8 +33,10 @@ class TrainingConfig:
     batch_size: int = 1024
     epochs: int = 10000
     learning_rate: float = 1e-3
+    lr_scheduler: Literal['step', 'plateau'] = 'step'
     lr_decay_step: int = 1000
     lr_decay_rate: float = 0.9
+    lr_patience: int = 500
     optimizer: Literal['adam', 'lbfgs'] = 'adam'
     gradient_clip_val: Optional[float] = 1.0
     verbose: bool = True
@@ -143,16 +145,10 @@ class MertonModelConfig:
         mu: Asset drift (expected return)
         sigma: Asset volatility
         x0: Initial log-asset value X_0 = ln(V_0)
-        debt_threshold: Debt level D (for default probability calculations)
-
-    References:
-        - PhD Research Document: Section 3.1 (The Merton Structural Model)
-        - PhD Research Document: Section 3.2 (Log-Space Transformation and FPE Derivation)
     """
     mu: float = 0.05
     sigma: float = 0.2
     x0: float = 0.0
-    debt_threshold: Optional[float] = None
 
     def __post_init__(self):
         """Validate Merton model parameters."""
@@ -188,10 +184,6 @@ class ScoreModelConfig:
         phi_start: Initial weight φ_0 for theoretical score at t=0
         phi_end: Final weight φ_T for theoretical score at t=T
         interpolation: Method for φ_t interpolation ('linear', 'exponential', 'sigmoid')
-
-    References:
-        - PhD Research Document: Equation (2.20)
-        - PhD Research Document: Section 2.3.4 (Sampling via Langevin Dynamics)
     """
     phi_start: float = 0.0
     phi_end: float = 1.0

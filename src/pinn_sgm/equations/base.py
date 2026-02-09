@@ -3,9 +3,6 @@ Abstract base class for PDEs in PINN framework.
 
 Defines the interface for PDE equations to be solved using
 Physics-Informed Neural Networks.
-
-References:
-    - PhD Research Document: Section 2.2.1 (Problem Formulation)
 """
 
 from abc import ABC, abstractmethod
@@ -22,8 +19,8 @@ class BasePDE(ABC):
 
     A general PDE has the form:
         ∂u/∂t + F[u, ∇u, ∇²u, x, t] = 0    in Ω × [0, T]
-        u(x, 0) = u_0(x)                     in Ω
-        B[u] = g(x, t)                       on ∂Ω × [0, T]
+        u(x, 0) = u_0(x)                   in Ω
+        B[u] = g(x, t)                     on ∂Ω × [0, T]
 
     where F is the PDE operator and B is the boundary operator.
     """

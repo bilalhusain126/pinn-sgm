@@ -3,13 +3,9 @@ Fokker-Planck equation implementations for financial models.
 
 This module implements the Fokker-Planck equation (FPE) governing the evolution
 of probability density functions for stochastic processes.
-
-References:
-    - PhD Research Document: Section 2.1 (The Fokker-Planck Equation)
-    - PhD Research Document: Section 3.2 (Log-Space Transformation and FPE Derivation)
 """
 
-from typing import Optional, Callable
+from typing import Optional
 import torch
 import numpy as np
 
@@ -39,9 +35,6 @@ class FokkerPlanckMerton(BasePDE):
         x0: Initial log-asset value
         device: Computation device
         dtype: Tensor data type
-
-    References:
-        - PhD Research Document: Equation (3.1), (3.4), (3.6)
     """
 
     def __init__(
@@ -124,7 +117,7 @@ class FokkerPlanckMerton(BasePDE):
         variance = epsilon ** 2
 
         # Gaussian approximation of delta function
-        coeff = 1.0 / torch.sqrt(2 * np.pi * variance)
+        coeff = 1.0 / np.sqrt(2 * np.pi * variance)
         exponent = -(x - self.x0) ** 2 / (2 * variance)
         p0 = coeff * torch.exp(exponent)
 
@@ -153,9 +146,6 @@ class FokkerPlanckMerton(BasePDE):
 
         Returns:
             Analytical density [Batch, 1]
-
-        References:
-            - PhD Research Document: Section 3.2
         """
         if x.dim() == 1:
             x = x.unsqueeze(-1)
@@ -170,58 +160,56 @@ class FokkerPlanckMerton(BasePDE):
         var_t = self.sigma ** 2 * t
 
         # Gaussian density
-        coeff = 1.0 / torch.sqrt(2 * np.pi * var_t)
+        coeff = 1.0 / torch.sqrt(torch.tensor(2 * np.pi) * var_t)
         exponent = -(x - mu_t) ** 2 / (2 * var_t)
         p = coeff * torch.exp(exponent)
 
         return p
 
-    def default_probability(
+    def analytical_score(
         self,
-        debt_threshold: Optional[float] = None,
-        t: Optional[float] = None
-    ) -> float:
+        x: torch.Tensor,
+        t: torch.Tensor
+    ) -> torch.Tensor:
         """
-        Compute probability of default P(X_T < ln(D)) = P(V_T < D).
+        Analytical score function for the Merton model.
 
-        Using the analytical solution, this is:
-            P(default) = Φ((ln(D) - μ_T) / σ_T)
+        For the Gaussian density with mean μ_t = x_0 + α*t and variance σ²*t,
+        the score function (gradient of log-density) is:
 
-        where Φ is the standard normal CDF.
+            s(x, t) = ∇_x log p(x, t) = -(x - μ_t) / (σ² t)
+
+        This provides exact ground truth for validating PINN and SGM scores.
 
         Args:
-            debt_threshold: Debt level D (uses config if not provided)
-            t: Time horizon (terminal time)
+            x: Spatial coordinates [Batch, 1] or [Batch]
+            t: Time values [Batch, 1] or [Batch]
 
         Returns:
-            Default probability
+            Score values [Batch, 1]
 
-        References:
-            - Merton (1974): "On the Pricing of Corporate Debt"
+        Example:
+            >>> equation = FokkerPlanckMerton(config)
+            >>> x = torch.tensor([[0.0], [1.0]])
+            >>> t = torch.tensor([[0.5], [0.5]])
+            >>> score = equation.analytical_score(x, t)
         """
-        if debt_threshold is None:
-            if self.config.debt_threshold is None:
-                raise ValueError("debt_threshold must be provided or set in config")
-            debt_threshold = self.config.debt_threshold
+        if x.dim() == 1:
+            x = x.unsqueeze(-1)
+        if t.dim() == 1:
+            t = t.unsqueeze(-1)
 
-        if t is None:
-            raise ValueError("Time horizon t must be provided")
+        # Avoid t=0 to prevent division by zero
+        t = torch.clamp(t, min=1e-6)
 
-        # Log of debt threshold
-        ln_D = np.log(debt_threshold)
-
-        # Mean and std at time t
+        # Time-evolved mean and variance
         mu_t = self.x0 + self.alpha * t
-        sigma_t = self.sigma * np.sqrt(t)
+        var_t = self.sigma ** 2 * t
 
-        # Standardized distance to default
-        d = (ln_D - mu_t) / sigma_t
+        # Score: s(x, t) = -(x - μ_t) / (σ² t)
+        score = -(x - mu_t) / var_t
 
-        # Default probability using normal CDF
-        from scipy.stats import norm
-        prob_default = norm.cdf(d)
-
-        return prob_default
+        return score
 
     def __repr__(self) -> str:
         """String representation."""
@@ -229,119 +217,3 @@ class FokkerPlanckMerton(BasePDE):
             f"FokkerPlanckMerton(μ={self.mu:.4f}, σ={self.sigma:.4f}, "
             f"α={self.alpha:.4f}, x0={self.x0:.4f})"
         )
-
-
-class FokkerPlanckGeneral(BasePDE):
-    """
-    General Fokker-Planck equation with arbitrary drift and diffusion.
-
-    The general FPE for a stochastic process:
-        dX_t = μ(X_t, t) dt + σ(X_t, t) dW_t
-
-    has the form:
-        ∂p/∂t = -∂/∂x[μ(x,t) p] + (1/2) ∂²/∂x²[σ²(x,t) p]
-
-    For constant coefficients (μ, σ independent of x, t), this reduces to:
-        ∂p/∂t + μ ∂p/∂x - (σ²/2) ∂²p/∂x² = 0
-
-    Args:
-        drift_fn: Drift function μ(x, t)
-        diffusion_fn: Diffusion function σ(x, t)
-        initial_condition_fn: Initial density p(x, 0)
-        device: Computation device
-        dtype: Tensor data type
-
-    References:
-        - PhD Research Document: Theorem 2.1 (Equation 2.2)
-    """
-
-    def __init__(
-        self,
-        drift_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        diffusion_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        initial_condition_fn: Callable[[torch.Tensor], torch.Tensor],
-        device: torch.device = torch.device('cpu'),
-        dtype: torch.dtype = torch.float32
-    ):
-        super().__init__(spatial_dim=1, device=device, dtype=dtype)
-
-        self.drift_fn = drift_fn
-        self.diffusion_fn = diffusion_fn
-        self.initial_condition_fn = initial_condition_fn
-
-    def pde_residual(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        u: torch.Tensor,
-        u_t: torch.Tensor,
-        u_x: torch.Tensor,
-        u_xx: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Compute general Fokker-Planck PDE residual.
-
-        Conservative form:
-            ∂p/∂t = -∂/∂x[μ(x,t) p] + (1/2) ∂²/∂x²[σ²(x,t) p]
-
-        Expanding (using product rule):
-            ∂p/∂t = -[∂μ/∂x p + μ ∂p/∂x] + (1/2)[∂²(σ²)/∂x² p + 2 ∂(σ²)/∂x ∂p/∂x + σ² ∂²p/∂x²]
-
-        For constant coefficients (μ_x = 0, σ_x = 0):
-            ∂p/∂t = -μ ∂p/∂x + (σ²/2) ∂²p/∂x²
-
-        Args:
-            x: Spatial coordinates [Batch, 1]
-            t: Time coordinates [Batch, 1]
-            u: Density p(x, t) [Batch, 1]
-            u_t: Time derivative ∂p/∂t [Batch, 1]
-            u_x: Spatial derivative ∂p/∂x [Batch, 1]
-            u_xx: Second spatial derivative ∂²p/∂x² [Batch, 1]
-
-        Returns:
-            PDE residual [Batch, 1]
-        """
-        # Evaluate drift and diffusion at (x, t)
-        mu = self.drift_fn(x, t)  # [Batch, 1]
-        sigma = self.diffusion_fn(x, t)  # [Batch, 1]
-        D = 0.5 * sigma ** 2  # Diffusion coefficient
-
-        # Advection term: μ ∂p/∂x
-        advection = mu * u_x
-
-        # Diffusion term: -(σ²/2) ∂²p/∂x²
-        diffusion = -D * u_xx
-
-        # Residual: ∂p/∂t + μ ∂p/∂x - (σ²/2) ∂²p/∂x²
-        residual = u_t + advection + diffusion
-
-        return residual
-
-    def initial_condition(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Compute initial condition using provided function.
-
-        Args:
-            x: Spatial coordinates [Batch, 1]
-
-        Returns:
-            Initial density p(x, 0) [Batch, 1]
-        """
-        return self.initial_condition_fn(x)
-
-    def analytical_solution(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor
-    ) -> Optional[torch.Tensor]:
-        """
-        No general analytical solution available.
-
-        Returns:
-            None (no analytical solution)
-        """
-        return None
-
-    def __repr__(self) -> str:
-        """String representation."""
-        return "FokkerPlanckGeneral(drift=custom, diffusion=custom)"

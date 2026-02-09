@@ -4,11 +4,6 @@ Score function extraction from PINN-solved density fields.
 This module implements the extraction of theoretical score functions from
 trained PINN solutions of the Fokker-Planck equation, enabling integration
 with score-based generative models.
-
-References:
-    - PhD Research Document: Section 3.4 (Score Extraction for Diffusion Models)
-    - PhD Research Document: Equation (3.8)
-    - PhD Research Document: Equation (2.20) (Hybrid Score Field)
 """
 
 import logging
@@ -38,10 +33,6 @@ class ScoreExtractor:
         device: Computation device
         dtype: Tensor data type
         epsilon: Small constant to prevent division by zero
-
-    References:
-        - PhD Research Document: Equation (3.8)
-        - PhD Research Document: Section 2.3.1 (The Score Function)
     """
 
     def __init__(
@@ -96,7 +87,8 @@ class ScoreExtractor:
             Score [Batch, 1]
         """
         # Ensure gradients are enabled
-        x = x.requires_grad_(True)
+        # Clone and detach first to handle tensors created with no_grad()
+        x = x.detach().clone().requires_grad_(True)
 
         # Forward pass: compute density
         p = self.network(x, t)  # [Batch, 1]
@@ -113,87 +105,6 @@ class ScoreExtractor:
         # Score: s = (∇p) / p
         # Add epsilon to denominator for numerical stability
         score = grad_p / (p + self.epsilon)
-
-        return score
-
-    def compute_score_safe(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        min_density: float = 1e-6
-    ) -> torch.Tensor:
-        """
-        Compute score with additional safety checks for numerical stability.
-
-        In regions where p(x, t) is very small, the score can become numerically
-        unstable. This method clips the density to a minimum value.
-
-        Args:
-            x: Spatial coordinates [Batch, 1]
-            t: Temporal coordinates [Batch, 1]
-            min_density: Minimum density value for clipping
-
-        Returns:
-            Score [Batch, 1]
-        """
-        # Ensure gradients are enabled
-        x = x.requires_grad_(True)
-
-        # Forward pass
-        p = self.network(x, t)
-
-        # Clip density to minimum value
-        p_clipped = torch.clamp(p, min=min_density)
-
-        # Compute gradient
-        grad_p = torch.autograd.grad(
-            outputs=p_clipped,
-            inputs=x,
-            grad_outputs=torch.ones_like(p_clipped),
-            create_graph=True,
-            retain_graph=True
-        )[0]
-
-        # Score
-        score = grad_p / p_clipped
-
-        return score
-
-    def compute_score_log_derivative(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Alternative score computation using log-derivative trick.
-
-        Computes s = ∇_x log p(x, t) directly by taking gradient of log(p).
-        This can be more numerically stable in some cases.
-
-        Args:
-            x: Spatial coordinates [Batch, 1]
-            t: Temporal coordinates [Batch, 1]
-
-        Returns:
-            Score [Batch, 1]
-        """
-        # Ensure gradients are enabled
-        x = x.requires_grad_(True)
-
-        # Forward pass
-        p = self.network(x, t)
-
-        # Compute log-density (add epsilon for stability)
-        log_p = torch.log(p + self.epsilon)
-
-        # Gradient of log-density
-        score = torch.autograd.grad(
-            outputs=log_p,
-            inputs=x,
-            grad_outputs=torch.ones_like(log_p),
-            create_graph=True,
-            retain_graph=True
-        )[0]
 
         return score
 
@@ -227,11 +138,10 @@ class ScoreExtractor:
         x_input = x_grid.unsqueeze(-1)
         t_input = t_grid.unsqueeze(-1)
 
-        # Compute scores
-        with torch.no_grad():
-            scores = self.compute_score(x_input, t_input).squeeze()
+        # Compute scores (requires gradients, so no torch.no_grad())
+        scores = self.compute_score(x_input, t_input).squeeze()
 
-        return x_grid.cpu().numpy(), scores.cpu().numpy()
+        return x_grid.cpu().numpy(), scores.detach().cpu().numpy()
 
 
 def hybrid_score(
@@ -267,11 +177,7 @@ def hybrid_score(
 
     Returns:
         Hybrid score ŝ(x, t) [Batch, 1]
-
-    References:
-        - PhD Research Document: Equation (2.20)
-        - PhD Research Document: Section 2.3.4 (Modified Langevin Corrector)
-
+        
     Examples:
         >>> config = ScoreModelConfig(phi_start=0.0, phi_end=1.0, interpolation='linear')
         >>> # At t=0 (high data density): φ_0 = 0, use empirical score
@@ -326,10 +232,6 @@ class LangevinCorrector:
         score_extractor: Theoretical score extractor s_theory(x, t)
         config: Score model configuration
         step_size: Langevin step size ε
-
-    References:
-        - PhD Research Document: Equation (2.19), (2.20)
-        - Song et al. (2021): "Score-Based Generative Modeling through SDEs"
     """
 
     def __init__(

@@ -10,7 +10,6 @@ The framework enables theory-constrained score estimation in sparse-data regimes
 for quantitative finance applications.
 
 References:
-    - PhD Research Document: Chapter 2 (Preliminaries), Chapter 3 (Theory-Constrained Score Estimation)
 """
 
 import logging

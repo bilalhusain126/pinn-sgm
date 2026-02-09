@@ -7,10 +7,9 @@ for financial applications.
 """
 
 from .base import BasePDE
-from .fokker_planck import FokkerPlanckMerton, FokkerPlanckGeneral
+from .fokker_planck import FokkerPlanckMerton
 
 __all__ = [
     'BasePDE',
     'FokkerPlanckMerton',
-    'FokkerPlanckGeneral',
 ]

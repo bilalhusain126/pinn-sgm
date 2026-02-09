@@ -3,19 +3,14 @@ Physics-Informed Neural Network (PINN) solver for PDEs.
 
 This module implements the core PINN algorithm using automatic differentiation
 to enforce PDE constraints during neural network training.
-
-References:
-    - PhD Research Document: Section 2.2 (Physics-Informed Neural Networks)
-    - PhD Research Document: Section 3.3 (PINN Solver for the Density Field)
-    - Raissi et al. (2019): "Physics-informed neural networks"
 """
 
 import logging
+import time
 from typing import Dict, Any, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
 import numpy as np
 
 from ..equations.base import BasePDE
@@ -47,9 +42,6 @@ class PINNSolver:
         network: Neural network approximating u(x, t)
         pinn_config: PINN configuration
         training_config: Training configuration
-
-    References:
-        - PhD Research Document: Equation (2.8)-(2.11)
     """
 
     def __init__(
@@ -98,11 +90,21 @@ class PINNSolver:
             raise ValueError(f"Unknown optimizer: {self.training_config.optimizer}")
 
         # Learning rate scheduler
-        self.scheduler = optim.lr_scheduler.StepLR(
-            self.optimizer,
-            step_size=self.training_config.lr_decay_step,
-            gamma=self.training_config.lr_decay_rate
-        )
+        if self.training_config.lr_scheduler == 'step':
+            self.scheduler = optim.lr_scheduler.StepLR(
+                self.optimizer,
+                step_size=self.training_config.lr_decay_step,
+                gamma=self.training_config.lr_decay_rate
+            )
+        elif self.training_config.lr_scheduler == 'plateau':
+            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=self.training_config.lr_decay_rate,
+                patience=self.training_config.lr_patience
+            )
+        else:
+            raise ValueError(f"Unknown lr_scheduler: {self.training_config.lr_scheduler}")
 
         # Training history
         self.history = {
@@ -134,9 +136,6 @@ class PINNSolver:
             u_t: Time derivative ∂u/∂t [Batch, 1]
             u_x: Spatial derivative ∂u/∂x [Batch, 1]
             u_xx: Second spatial derivative ∂²u/∂x² [Batch, 1]
-
-        References:
-            - PhD Research Document: Section 2.2.3 (Automatic Differentiation)
         """
         # Forward pass through network
         u = self.network(x, t)  # [Batch, 1]
@@ -177,7 +176,7 @@ class PINNSolver:
         """
         cfg = self.pinn_config
 
-        # Interior points (Latin hypercube sampling)
+        # Interior points 
         x_pde = torch.rand(cfg.num_collocation, 1, device=self.device, dtype=self.dtype)
         x_pde = cfg.x_min + (cfg.x_max - cfg.x_min) * x_pde
         t_pde = cfg.T * torch.rand(cfg.num_collocation, 1, device=self.device, dtype=self.dtype)
@@ -290,9 +289,6 @@ class PINNSolver:
 
         Returns:
             Normalization violation: (∫p dx - 1)²
-
-        References:
-            - PhD Research Document: Section 3.3
         """
         if not self.pinn_config.enforce_normalization:
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
@@ -384,20 +380,16 @@ class PINNSolver:
                 - 'network': Trained network
                 - 'history': Training history
                 - 'final_loss': Final loss value
-
-        References:
-            - PhD Research Document: Section 2.2.4 (Collocation Points and Optimization)
         """
         self.network.train()
 
-        # Progress bar
-        pbar = tqdm(
-            range(self.training_config.epochs),
-            desc="Training PINN",
-            disable=not self.training_config.verbose
-        )
+        # Training header
+        start_time = time.time()
+        if self.training_config.verbose:
+            print(f"\n{'Epoch':<12} {'Loss':<12} {'PDE':<12} {'IC':<12} {'BC':<12} {'Time':<12}")
+            print("-" * 72)
 
-        for epoch in pbar:
+        for epoch in range(self.training_config.epochs):
             # Sample new collocation points each epoch
             collocation_points = self._sample_collocation_points()
 
@@ -421,29 +413,36 @@ class PINNSolver:
             self.optimizer.step()
 
             # Learning rate decay
-            self.scheduler.step()
+            if self.training_config.lr_scheduler == 'plateau':
+                self.scheduler.step(loss.item())
+            else:
+                self.scheduler.step()
 
-            # Logging
-            if epoch % self.training_config.log_interval == 0:
-                pbar.set_postfix({
-                    'loss': f"{loss.item():.6f}",
-                    'loss_pde': f"{self.history['loss_pde'][-1]:.6f}",
-                    'loss_ic': f"{self.history['loss_ic'][-1]:.6f}",
-                    'lr': f"{self.history['learning_rate'][-1]:.6f}"
-                })
+            # Periodic logging
+            if epoch % self.training_config.log_interval == 0 and self.training_config.verbose:
+                elapsed = time.time() - start_time
+                it_per_sec = (epoch + 1) / elapsed if elapsed > 0 else 0
+                epoch_str = f"{epoch}/{self.training_config.epochs}"
+                time_str = f"{it_per_sec:.2f}it/s"
+                print(
+                    f"{epoch_str:<12} "
+                    f"{loss.item():<12.4e} "
+                    f"{self.history['loss_pde'][-1]:<12.4e} "
+                    f"{self.history['loss_ic'][-1]:<12.4e} "
+                    f"{self.history['loss_bc'][-1]:<12.4e} "
+                    f"{time_str:<12}"
+                )
 
-                if self.training_config.verbose:
-                    logger.info(
-                        f"Epoch {epoch}/{self.training_config.epochs} | "
-                        f"Loss: {loss.item():.6f} | "
-                        f"PDE: {self.history['loss_pde'][-1]:.6f} | "
-                        f"IC: {self.history['loss_ic'][-1]:.6f} | "
-                        f"BC: {self.history['loss_bc'][-1]:.6f}"
-                    )
-
-        pbar.close()
-
-        logger.info("Training completed!")
+        # Final summary
+        if self.training_config.verbose:
+            total_time = time.time() - start_time
+            print("-" * 72)
+            final_loss = self.history['loss_total'][-1]
+            final_pde = self.history['loss_pde'][-1]
+            final_ic = self.history['loss_ic'][-1]
+            final_bc = self.history['loss_bc'][-1]
+            print(f"Training completed in {total_time:.2f}s ({total_time/60:.2f}min)")
+            print(f"Final: Total={final_loss:.4e}, PDE={final_pde:.4e}, IC={final_ic:.4e}, BC={final_bc:.4e}\n")
 
         return {
             'network': self.network,
@@ -518,15 +517,13 @@ class PINNSolver:
             logger.warning("No analytical solution available for error computation")
             return {}
 
-        # Compute errors
+        # Compute absolute errors 
         abs_error = torch.abs(u_pred - u_true)
-        rel_error = abs_error / (torch.abs(u_true) + 1e-8)
 
         errors = {
             'l2_error': torch.sqrt(torch.mean((u_pred - u_true) ** 2)).item(),
             'max_abs_error': torch.max(abs_error).item(),
             'mean_abs_error': torch.mean(abs_error).item(),
-            'mean_rel_error': torch.mean(rel_error).item(),
         }
 
         return errors
