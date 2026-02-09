@@ -14,4 +14,4 @@ pip install -e .
 
 ## Usage
 
-See `notebooks/demo_merton_restructured.ipynb` for an example.
+See `notebooks/demo_merton.ipynb` for an example.
