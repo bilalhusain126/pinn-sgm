@@ -272,23 +272,6 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         # Expand constant diffusion to batch size
         return self.sigma.unsqueeze(0).expand(batch_size, -1, -1)
 
-    def diffusion_squared(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """
-        Compute D(x, t) = ΣΣᵀ (constant diffusion squared).
-
-        Overrides base class for efficiency since D is precomputed and constant.
-
-        Args:
-            x: State coordinates [Batch, spatial_dim]
-            t: Time values [Batch, 1]
-
-        Returns:
-            D = ΣΣᵀ [Batch, spatial_dim, spatial_dim]
-        """
-        batch_size = x.shape[0]
-        # Expand precomputed D to batch size
-        return self.D.unsqueeze(0).expand(batch_size, -1, -1)
-
     def is_constant_coefficients(self) -> bool:
         """
         Check if drift and diffusion are constant.

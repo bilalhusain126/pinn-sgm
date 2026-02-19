@@ -203,24 +203,6 @@ class BaseSDE(ABC):
         """
         pass
 
-    def diffusion_squared(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """
-        Compute D(x, t) = G(x, t) G(x, t)ᵀ.
-
-        Default implementation computes GGᵀ from diffusion().
-        Override for efficiency if D is known directly.
-
-        Args:
-            x: State coordinates [Batch, spatial_dim]
-            t: Time values [Batch, 1]
-
-        Returns:
-            D(x, t) = GGᵀ [Batch, spatial_dim, spatial_dim]
-        """
-        G = self.diffusion(x, t)  # [Batch, spatial_dim, spatial_dim]
-        D = torch.bmm(G, G.transpose(-2, -1))  # GGᵀ
-        return D
-
     @abstractmethod
     def initial_score(self, x: torch.Tensor, t_epsilon: float = 0.1) -> torch.Tensor:
         """

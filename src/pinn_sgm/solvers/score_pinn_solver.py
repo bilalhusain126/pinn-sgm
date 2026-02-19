@@ -120,8 +120,9 @@ class ScorePINNSolver:
         batch_size = x.shape[0]
 
         # Get drift and diffusion from equation (supports state-dependent coefficients)
-        f = self.equation.drift(x, t)  # [Batch, spatial_dim]
-        D = self.equation.diffusion_squared(x, t)  # [Batch, spatial_dim, spatial_dim]
+        f = self.equation.drift(x, t)                    # [Batch, spatial_dim]
+        G = self.equation.diffusion(x, t)                # [Batch, spatial_dim, spatial_dim]
+        D = torch.bmm(G, G.transpose(-2, -1))            # D = GGᵀ [Batch, spatial_dim, spatial_dim]
 
         # Term 1: (1/2)∇·(Ds)
         # Compute Ds = D @ s
