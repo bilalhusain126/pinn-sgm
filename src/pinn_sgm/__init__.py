@@ -8,8 +8,6 @@ This package implements a unified framework combining:
 
 The framework enables theory-constrained score estimation in sparse-data regimes
 for quantitative finance applications.
-
-References:
 """
 
 import logging
@@ -18,12 +16,9 @@ from typing import Optional
 # Package version
 __version__ = "1.0.0"
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Library best practice: add NullHandler so log messages are silently
+# discarded unless the application configures logging explicitly.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 
 def setup_logging(

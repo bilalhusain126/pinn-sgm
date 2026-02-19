@@ -3,12 +3,10 @@ Configuration dataclasses for PINN solvers and training.
 
 This module defines configuration objects using Python dataclasses with
 post-initialization validation to ensure parameter consistency.
-
-References:
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple
 import torch
 
 
@@ -26,6 +24,7 @@ class TrainingConfig:
         lr_decay_rate: Multiplicative factor for LR decay (gamma)
         lr_patience: Epochs to wait before reducing LR (for 'plateau' scheduler)
         optimizer: Optimizer type ('adam' or 'lbfgs')
+        weight_decay: L2 penalty coefficient for AdamW optimizer (0.0 disables)
         gradient_clip_val: Maximum gradient norm (None to disable clipping)
         verbose: If True, print training progress
         log_interval: Number of epochs between progress logs
@@ -38,6 +37,7 @@ class TrainingConfig:
     lr_decay_rate: float = 0.9
     lr_patience: int = 500
     optimizer: Literal['adam', 'lbfgs'] = 'adam'
+    weight_decay: float = 1e-4
     gradient_clip_val: Optional[float] = 1.0
     verbose: bool = True
     log_interval: int = 100
@@ -59,6 +59,12 @@ class TrainingConfig:
         if not 0 < self.lr_decay_rate <= 1:
             raise ValueError(f"lr_decay_rate must be in (0, 1], got {self.lr_decay_rate}")
 
+        if self.lr_patience <= 0:
+            raise ValueError(f"lr_patience must be positive, got {self.lr_patience}")
+
+        if self.weight_decay < 0:
+            raise ValueError(f"weight_decay must be non-negative, got {self.weight_decay}")
+
         if self.gradient_clip_val is not None and self.gradient_clip_val <= 0:
             raise ValueError(f"gradient_clip_val must be positive or None, got {self.gradient_clip_val}")
 
@@ -72,35 +78,77 @@ class PINNConfig:
     Configuration for Physics-Informed Neural Network PDE solver.
 
     Attributes:
-        T: Terminal time for PDE solution
-        x_min: Minimum spatial domain boundary
-        x_max: Maximum spatial domain boundary
+        x_range: Spatial domain (x_min, x_max)
+        t_range: Time domain (t_min, t_max)
         num_collocation: Number of interior collocation points
         num_boundary: Number of boundary collocation points (if applicable)
         num_initial: Number of initial condition points
+        num_integration: Number of quadrature points for 1D normalization integral
+        num_mc_samples: Number of Monte Carlo samples for multi-D normalization integral
         device: Computation device ('cpu' or 'cuda')
         dtype: Tensor data type
         enforce_normalization: If True, enforce ∫p(x,t)dx = 1
-        normalization_weight: Weight for normalization loss term
+        pde_weight: Weight λ_PDE for PDE residual loss term
+        ic_weight: Weight λ_IC for initial condition loss term
+        bc_weight: Weight λ_BC for boundary condition loss term
+        normalization_weight: Weight λ_norm for normalization loss term
     """
-    T: float = 1.0
-    x_min: float = -5.0
-    x_max: float = 5.0
+    x_range: Tuple[float, float] = (-5.0, 5.0)
+    t_range: Tuple[float, float] = (0.0, 1.0)
     num_collocation: int = 10000
     num_boundary: int = 1000
     num_initial: int = 1000
+    num_integration: int = 500
+    num_mc_samples: int = 5000
     device: str = 'cpu'
     dtype: torch.dtype = torch.float32
     enforce_normalization: bool = True
+    pde_weight: float = 1.0
+    ic_weight: float = 1.0
+    bc_weight: float = 1.0
     normalization_weight: float = 1.0
+
+    @property
+    def x_min(self) -> float:
+        """Minimum spatial coordinate."""
+        return self.x_range[0]
+
+    @property
+    def x_max(self) -> float:
+        """Maximum spatial coordinate."""
+        return self.x_range[1]
+
+    @property
+    def t_min(self) -> float:
+        """Minimum time."""
+        return self.t_range[0]
+
+    @property
+    def t_max(self) -> float:
+        """Maximum time."""
+        return self.t_range[1]
+
+    @property
+    def T(self) -> float:
+        """Terminal time (alias for t_max for backward compatibility)."""
+        return self.t_range[1]
 
     def __post_init__(self):
         """Validate PINN configuration parameters."""
-        if self.T <= 0:
-            raise ValueError(f"T must be positive, got {self.T}")
+        if len(self.x_range) != 2:
+            raise ValueError(f"x_range must be a tuple of (x_min, x_max), got {self.x_range}")
 
-        if self.x_min >= self.x_max:
-            raise ValueError(f"x_min must be < x_max, got x_min={self.x_min}, x_max={self.x_max}")
+        if self.x_range[0] >= self.x_range[1]:
+            raise ValueError(f"x_min must be < x_max, got x_range={self.x_range}")
+
+        if len(self.t_range) != 2:
+            raise ValueError(f"t_range must be a tuple of (t_min, t_max), got {self.t_range}")
+
+        if self.t_range[0] < 0:
+            raise ValueError(f"t_min must be non-negative, got t_range={self.t_range}")
+
+        if self.t_range[0] >= self.t_range[1]:
+            raise ValueError(f"t_min must be < t_max, got t_range={self.t_range}")
 
         if self.num_collocation <= 0:
             raise ValueError(f"num_collocation must be positive, got {self.num_collocation}")
@@ -111,10 +159,25 @@ class PINNConfig:
         if self.num_initial <= 0:
             raise ValueError(f"num_initial must be positive, got {self.num_initial}")
 
+        if self.num_integration <= 0:
+            raise ValueError(f"num_integration must be positive, got {self.num_integration}")
+
+        if self.num_mc_samples <= 0:
+            raise ValueError(f"num_mc_samples must be positive, got {self.num_mc_samples}")
+
         if self.device not in ['cpu', 'cuda', 'mps']:
             # Also allow explicit device indices like 'cuda:0'
             if not (self.device.startswith('cuda:') or self.device.startswith('mps:')):
                 raise ValueError(f"device must be 'cpu', 'cuda', 'mps', or explicit device, got {self.device}")
+
+        if self.pde_weight < 0:
+            raise ValueError(f"pde_weight must be non-negative, got {self.pde_weight}")
+
+        if self.ic_weight < 0:
+            raise ValueError(f"ic_weight must be non-negative, got {self.ic_weight}")
+
+        if self.bc_weight < 0:
+            raise ValueError(f"bc_weight must be non-negative, got {self.bc_weight}")
 
         if self.normalization_weight < 0:
             raise ValueError(f"normalization_weight must be non-negative, got {self.normalization_weight}")
@@ -128,46 +191,6 @@ class PINNConfig:
     def domain_size(self) -> float:
         """Compute spatial domain size."""
         return self.x_max - self.x_min
-
-
-@dataclass
-class MertonModelConfig:
-    """
-    Configuration for Merton structural credit risk model.
-
-    The Merton model assumes firm asset value V_t follows Geometric Brownian Motion:
-        dV_t = μ V_t dt + σ V_t dW_t
-
-    In log-space X_t = ln(V_t), this becomes:
-        dX_t = (μ - σ²/2) dt + σ dW_t
-
-    Attributes:
-        mu: Asset drift (expected return)
-        sigma: Asset volatility
-        x0: Initial log-asset value X_0 = ln(V_0)
-    """
-    mu: float = 0.05
-    sigma: float = 0.2
-    x0: float = 0.0
-
-    def __post_init__(self):
-        """Validate Merton model parameters."""
-        if self.sigma <= 0:
-            raise ValueError(f"sigma must be positive, got {self.sigma}")
-
-    @property
-    def alpha(self) -> float:
-        """
-        Effective drift in log-space: α = μ - σ²/2
-
-        This is the drift term in the Fokker-Planck equation after Itô's lemma.
-        """
-        return self.mu - 0.5 * self.sigma ** 2
-
-    @property
-    def diffusion_coeff(self) -> float:
-        """Diffusion coefficient (same in both V and X space)."""
-        return self.sigma
 
 
 @dataclass
@@ -197,33 +220,102 @@ class ScoreModelConfig:
         if not 0 <= self.phi_end <= 1:
             raise ValueError(f"phi_end must be in [0, 1], got {self.phi_end}")
 
-    def get_phi(self, t: float, T: float) -> float:
-        """
-        Compute time-dependent weight φ_t ∈ [0, 1].
 
-        Args:
-            t: Current time
-            T: Terminal time
+@dataclass
+class ScorePINNConfig:
+    """
+    Configuration for Score-PINN solver.
 
-        Returns:
-            Weight for theoretical score at time t
-        """
-        normalized_t = t / T
+    Score-PINN learns the score function s(x,t) = ∇ log p(x,t) by solving
+    the Score PDE using physics-informed neural networks.
 
-        if self.interpolation == 'linear':
-            return self.phi_start + (self.phi_end - self.phi_start) * normalized_t
+    Attributes:
+        n_collocation: Number of collocation points for PDE residual
+        n_initial: Number of points for initial condition
+        batch_size: Batch size for residual computation
+        lambda_initial: Weight for initial condition loss
+        lambda_residual: Weight for PDE residual loss
+        x_range: Spatial domain range (x_min, x_max)
+        t_range: Time domain range (t_min, t_max)
+        method: Score learning method ('score_pinn', 'score_matching', 'sliced_score_matching')
+        n_projections: Number of projection directions for sliced score matching
+        use_hte: Whether to use Hutchinson Trace Estimation for divergence computation
+        n_hte_samples: Number of random samples for HTE (1 is usually sufficient)
+        t_epsilon: Regularization time for singular initial conditions (e.g., Dirac delta)
+    """
+    n_collocation: int = 10000
+    n_initial: int = 1000
+    batch_size: int = 256
+    lambda_initial: float = 1.0
+    lambda_residual: float = 1.0
+    x_range: Tuple[float, float] = (-5.0, 5.0)
+    t_range: Tuple[float, float] = (0.0, 1.0)
+    method: Literal['score_pinn', 'score_matching', 'sliced_score_matching'] = 'score_pinn'
+    n_projections: int = 1
+    use_hte: bool = True
+    n_hte_samples: int = 1
+    t_epsilon: float = 0.1
 
-        elif self.interpolation == 'exponential':
-            import numpy as np
-            alpha = np.log(self.phi_end / max(self.phi_start, 1e-8))
-            return self.phi_start * np.exp(alpha * normalized_t)
+    def __post_init__(self):
+        """Validate Score-PINN configuration parameters."""
+        if self.n_collocation <= 0:
+            raise ValueError(f"n_collocation must be positive, got {self.n_collocation}")
 
-        elif self.interpolation == 'sigmoid':
-            import numpy as np
-            # Sigmoid centered at t/T = 0.5
-            z = 10 * (normalized_t - 0.5)  # Steepness parameter = 10
-            sigmoid = 1 / (1 + np.exp(-z))
-            return self.phi_start + (self.phi_end - self.phi_start) * sigmoid
+        if self.n_initial <= 0:
+            raise ValueError(f"n_initial must be positive, got {self.n_initial}")
 
-        else:
-            raise ValueError(f"Unknown interpolation method: {self.interpolation}")
+        if self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {self.batch_size}")
+
+        if self.lambda_initial < 0:
+            raise ValueError(f"lambda_initial must be non-negative, got {self.lambda_initial}")
+
+        if self.lambda_residual < 0:
+            raise ValueError(f"lambda_residual must be non-negative, got {self.lambda_residual}")
+
+        if len(self.x_range) != 2:
+            raise ValueError(f"x_range must be a tuple of (x_min, x_max), got {self.x_range}")
+
+        if self.x_range[0] >= self.x_range[1]:
+            raise ValueError(f"x_range[0] must be < x_range[1], got x_range={self.x_range}")
+
+        if len(self.t_range) != 2:
+            raise ValueError(f"t_range must be a tuple of (t_min, t_max), got {self.t_range}")
+
+        if self.t_range[0] < 0:
+            raise ValueError(f"t_min must be non-negative, got t_range={self.t_range}")
+
+        if self.t_range[0] >= self.t_range[1]:
+            raise ValueError(f"t_range[0] must be < t_range[1], got t_range={self.t_range}")
+
+        if self.method not in ['score_pinn', 'score_matching', 'sliced_score_matching']:
+            raise ValueError(f"method must be 'score_pinn', 'score_matching', or 'sliced_score_matching', got {self.method}")
+
+        if self.n_projections <= 0:
+            raise ValueError(f"n_projections must be positive, got {self.n_projections}")
+
+        if self.n_hte_samples <= 0:
+            raise ValueError(f"n_hte_samples must be positive, got {self.n_hte_samples}")
+
+        if self.t_epsilon <= 0:
+            raise ValueError(f"t_epsilon must be positive, got {self.t_epsilon}")
+
+    @property
+    def x_min(self) -> float:
+        """Minimum spatial domain boundary."""
+        return self.x_range[0]
+
+    @property
+    def x_max(self) -> float:
+        """Maximum spatial domain boundary."""
+        return self.x_range[1]
+
+    @property
+    def t_min(self) -> float:
+        """Minimum time."""
+        return self.t_range[0]
+
+    @property
+    def t_max(self) -> float:
+        """Maximum time."""
+        return self.t_range[1]

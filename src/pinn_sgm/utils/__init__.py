@@ -1,23 +1,14 @@
 """
 Utility functions for PINN-SGM framework.
 
-This module provides utilities for score extraction, visualization,
-and integration with diffusion models.
+This module provides utilities for score extraction and
+integration with diffusion models.
+
+Note: Visualization functions have been moved to pinn_sgm.visualizations package.
 """
 
-from .score_extraction import ScoreExtractor, hybrid_score
-from .visualizations import (
-    plot_density_evolution,
-    plot_score_field,
-    plot_training_history,
-    plot_error_analysis
-)
+from .score_extraction import ScoreExtractor
 
 __all__ = [
     'ScoreExtractor',
-    'hybrid_score',
-    'plot_density_evolution',
-    'plot_score_field',
-    'plot_training_history',
-    'plot_error_analysis',
 ]

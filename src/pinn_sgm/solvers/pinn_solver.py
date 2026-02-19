@@ -10,12 +10,11 @@ import time
 from typing import Dict, Any, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import numpy as np
 
 from ..equations.base import BasePDE
-from ..nets.mlp import DensityMLP
 from ..config import PINNConfig, TrainingConfig
+from .training_utils import setup_optimizer, setup_scheduler, compute_gradient_norm
 
 logger = logging.getLogger(__name__)
 
@@ -59,52 +58,17 @@ class PINNSolver:
         self.equation = equation
 
         # Neural network
-        if network is None:
-            # Default: DensityMLP with 3 hidden layers of 64 neurons
-            self.network = DensityMLP(
-                input_dim=2,  # (x, t)
-                hidden_dims=[64, 64, 64],
-                activation='tanh'
-            )
-        else:
-            self.network = network
+        self.network = network
 
         # Move to device
         self.device = self.pinn_config.torch_device
         self.dtype = self.pinn_config.dtype
         self.network = self.network.to(device=self.device, dtype=self.dtype)
 
-        # Optimizer
-        if self.training_config.optimizer == 'adam':
-            self.optimizer = optim.Adam(
-                self.network.parameters(),
-                lr=self.training_config.learning_rate
-            )
-        elif self.training_config.optimizer == 'lbfgs':
-            self.optimizer = optim.LBFGS(
-                self.network.parameters(),
-                lr=self.training_config.learning_rate,
-                max_iter=20
-            )
-        else:
-            raise ValueError(f"Unknown optimizer: {self.training_config.optimizer}")
-
-        # Learning rate scheduler
-        if self.training_config.lr_scheduler == 'step':
-            self.scheduler = optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=self.training_config.lr_decay_step,
-                gamma=self.training_config.lr_decay_rate
-            )
-        elif self.training_config.lr_scheduler == 'plateau':
-            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer,
-                mode='min',
-                factor=self.training_config.lr_decay_rate,
-                patience=self.training_config.lr_patience
-            )
-        else:
-            raise ValueError(f"Unknown lr_scheduler: {self.training_config.lr_scheduler}")
+        # Optimizer and scheduler are created at train() time so that
+        # different training configs can be used without reconstructing the solver.
+        self.optimizer = None
+        self.scheduler = None
 
         # Training history
         self.history = {
@@ -113,7 +77,8 @@ class PINNSolver:
             'loss_ic': [],
             'loss_bc': [],
             'loss_norm': [],
-            'learning_rate': []
+            'learning_rate': [],
+            'grad_norm': []
         }
 
     def _compute_derivatives(
@@ -127,18 +92,23 @@ class PINNSolver:
         This is the core innovation of PINNs: we can compute exact derivatives
         of the neural network output with respect to inputs using the chain rule.
 
+        Supports both 1D and multi-dimensional spatial problems:
+        - 1D: u_x is [Batch, 1], u_xx is [Batch, 1, 1] (Hessian matrix)
+        - nD: u_x is [Batch, n], u_xx is [Batch, n, n] (Hessian matrix)
+
         Args:
-            x: Spatial coordinates [Batch, 1], requires_grad=True
+            x: Spatial coordinates [Batch, spatial_dim], requires_grad=True
             t: Temporal coordinates [Batch, 1], requires_grad=True
 
         Returns:
             u: Solution u(x, t) [Batch, 1]
             u_t: Time derivative ∂u/∂t [Batch, 1]
-            u_x: Spatial derivative ∂u/∂x [Batch, 1]
-            u_xx: Second spatial derivative ∂²u/∂x² [Batch, 1]
+            u_x: Spatial gradient ∇u [Batch, spatial_dim]
+            u_xx: Spatial Hessian ∇²u [Batch, spatial_dim, spatial_dim]
         """
-        # Forward pass through network
-        u = self.network(x, t)  # [Batch, 1]
+        # Forward pass through network (concatenated input)
+        inputs = torch.cat([x, t], dim=-1)  # [Batch, spatial_dim + 1]
+        u = self.network(inputs)  # [Batch, 1]
 
         # First-order derivatives using autograd
         grad_outputs = torch.ones_like(u)
@@ -150,23 +120,46 @@ class PINNSolver:
             create_graph=True,  # Allow second derivatives
             retain_graph=True
         )
-        u_x = u_grads[0]  # ∂u/∂x [Batch, 1]
+        u_x = u_grads[0]  # ∂u/∂x [Batch, spatial_dim]
         u_t = u_grads[1]  # ∂u/∂t [Batch, 1]
 
-        # Second-order spatial derivative
-        u_xx = torch.autograd.grad(
-            outputs=u_x,
-            inputs=x,
-            grad_outputs=torch.ones_like(u_x),
-            create_graph=True,
-            retain_graph=True
-        )[0]  # ∂²u/∂x² [Batch, 1]
+        # Second-order spatial derivatives (Hessian matrix)
+        spatial_dim = self.equation.spatial_dim
+        batch_size = x.shape[0]
+
+        if spatial_dim == 1:
+            # 1D case: simple second derivative
+            u_xx = torch.autograd.grad(
+                outputs=u_x,
+                inputs=x,
+                grad_outputs=torch.ones_like(u_x),
+                create_graph=True,
+                retain_graph=True
+            )[0]  # ∂²u/∂x² [Batch, 1]
+            u_xx = u_xx.unsqueeze(-1)  # Reshape to [Batch, 1, 1] for consistency
+        else:
+            # Multi-dimensional case: compute full Hessian matrix
+            u_xx = torch.zeros(batch_size, spatial_dim, spatial_dim, device=x.device, dtype=x.dtype)
+
+            for i in range(spatial_dim):
+                # Compute ∂²u/∂xⱼ∂xᵢ for all j
+                u_xx_i = torch.autograd.grad(
+                    outputs=u_x[:, i],
+                    inputs=x,
+                    grad_outputs=torch.ones(batch_size, device=x.device, dtype=x.dtype),
+                    create_graph=True,
+                    retain_graph=True
+                )[0]  # [Batch, spatial_dim]
+
+                u_xx[:, i, :] = u_xx_i
 
         return u, u_t, u_x, u_xx
 
     def _sample_collocation_points(self) -> Dict[str, torch.Tensor]:
         """
         Sample collocation points for PDE, initial, and boundary conditions.
+
+        Supports both 1D and multi-dimensional spatial domains.
 
         Returns:
             Dictionary with keys:
@@ -175,24 +168,51 @@ class PINNSolver:
                 - 'x_bc', 't_bc': Boundary points (if applicable)
         """
         cfg = self.pinn_config
+        spatial_dim = self.equation.spatial_dim
 
-        # Interior points 
-        x_pde = torch.rand(cfg.num_collocation, 1, device=self.device, dtype=self.dtype)
+        # Interior points
+        x_pde = torch.rand(cfg.num_collocation, spatial_dim, device=self.device, dtype=self.dtype)
         x_pde = cfg.x_min + (cfg.x_max - cfg.x_min) * x_pde
         t_pde = cfg.T * torch.rand(cfg.num_collocation, 1, device=self.device, dtype=self.dtype)
 
         # Initial condition points (t=0)
-        x_ic = torch.rand(cfg.num_initial, 1, device=self.device, dtype=self.dtype)
+        x_ic = torch.rand(cfg.num_initial, spatial_dim, device=self.device, dtype=self.dtype)
         x_ic = cfg.x_min + (cfg.x_max - cfg.x_min) * x_ic
 
         # Boundary points (x at boundaries, t random)
+        # For multi-dimensional domains, sample on boundary faces
         if cfg.num_boundary > 0:
             t_bc = cfg.T * torch.rand(cfg.num_boundary, 1, device=self.device, dtype=self.dtype)
-            x_bc_left = torch.full((cfg.num_boundary // 2, 1), cfg.x_min, device=self.device, dtype=self.dtype)
-            x_bc_right = torch.full((cfg.num_boundary - cfg.num_boundary // 2, 1), cfg.x_max, device=self.device, dtype=self.dtype)
-            x_bc = torch.cat([x_bc_left, x_bc_right], dim=0)
+
+            if spatial_dim == 1:
+                # 1D: boundary consists of two points
+                x_bc_left = torch.full((cfg.num_boundary // 2, 1), cfg.x_min, device=self.device, dtype=self.dtype)
+                x_bc_right = torch.full((cfg.num_boundary - cfg.num_boundary // 2, 1), cfg.x_max, device=self.device, dtype=self.dtype)
+                x_bc = torch.cat([x_bc_left, x_bc_right], dim=0)
+            else:
+                # Multi-D: sample on boundary hypercube faces
+                # For simplicity, sample uniformly on all faces
+                points_per_face = cfg.num_boundary // (2 * spatial_dim)
+                boundary_points = []
+
+                for dim in range(spatial_dim):
+                    # Sample on lower face (x_dim = x_min)
+                    x_face = torch.rand(points_per_face, spatial_dim, device=self.device, dtype=self.dtype)
+                    x_face = cfg.x_min + (cfg.x_max - cfg.x_min) * x_face
+                    x_face[:, dim] = cfg.x_min
+                    boundary_points.append(x_face)
+
+                    # Sample on upper face (x_dim = x_max)
+                    x_face = torch.rand(points_per_face, spatial_dim, device=self.device, dtype=self.dtype)
+                    x_face = cfg.x_min + (cfg.x_max - cfg.x_min) * x_face
+                    x_face[:, dim] = cfg.x_max
+                    boundary_points.append(x_face)
+
+                x_bc = torch.cat(boundary_points, dim=0)
+                # Adjust t_bc size to match
+                t_bc = t_bc[:x_bc.shape[0]]
         else:
-            x_bc = torch.empty(0, 1, device=self.device, dtype=self.dtype)
+            x_bc = torch.empty(0, spatial_dim, device=self.device, dtype=self.dtype)
             t_bc = torch.empty(0, 1, device=self.device, dtype=self.dtype)
 
         return {
@@ -208,7 +228,7 @@ class PINNSolver:
         Compute PDE residual loss: L_PDE = (1/N) Σ |F[u]|²
 
         Args:
-            x: Spatial coordinates [Batch, 1]
+            x: Spatial coordinates [Batch, spatial_dim]
             t: Temporal coordinates [Batch, 1]
 
         Returns:
@@ -234,15 +254,16 @@ class PINNSolver:
         Compute initial condition loss: L_IC = (1/N) Σ |u(x,0) - u_0(x)|²
 
         Args:
-            x: Spatial coordinates [Batch, 1]
+            x: Spatial coordinates [Batch, spatial_dim]
 
         Returns:
             Mean squared initial condition error
         """
-        t_zero = torch.zeros_like(x)
+        t_zero = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
-        # Network prediction at t=0
-        u_pred = self.network(x, t_zero)
+        # Network prediction at t=0 (concatenated input)
+        inputs = torch.cat([x, t_zero], dim=-1)
+        u_pred = self.network(inputs)
 
         # True initial condition
         u_true = self.equation.initial_condition(x)
@@ -257,7 +278,7 @@ class PINNSolver:
         Compute boundary condition loss: L_BC = (1/N) Σ |B[u] - g|²
 
         Args:
-            x: Boundary coordinates [Batch, 1]
+            x: Boundary coordinates [Batch, spatial_dim]
             t: Temporal coordinates [Batch, 1]
 
         Returns:
@@ -266,8 +287,9 @@ class PINNSolver:
         if x.shape[0] == 0:
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
-        # Network prediction at boundary
-        u_pred = self.network(x, t)
+        # Network prediction at boundary (concatenated input)
+        inputs = torch.cat([x, t], dim=-1)
+        u_pred = self.network(inputs)
 
         # Boundary condition residual
         residual = self.equation.boundary_condition(x, t, u_pred)
@@ -281,8 +303,9 @@ class PINNSolver:
         """
         Enforce normalization constraint: ∫ p(x, t) dx = 1
 
-        This is critical for probability densities. We approximate the integral
-        using the trapezoidal rule on a fine grid.
+        This is critical for probability densities. We approximate the integral:
+        - 1D: trapezoidal rule on a fine grid
+        - Multi-D: Monte Carlo integration
 
         Args:
             t: Time value (scalar or single-element tensor)
@@ -293,31 +316,51 @@ class PINNSolver:
         if not self.pinn_config.enforce_normalization:
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
-        # Create integration grid
-        num_integration_points = 500
-        x_grid = torch.linspace(
-            self.pinn_config.x_min,
-            self.pinn_config.x_max,
-            num_integration_points,
-            device=self.device,
-            dtype=self.dtype
-        ).unsqueeze(-1)  # [N, 1]
+        spatial_dim = self.equation.spatial_dim
 
-        # Time broadcast
+        # Time value
         if isinstance(t, float):
             t_val = t
         else:
             t_val = t.item() if t.numel() == 1 else t.mean().item()
 
-        t_grid = torch.full_like(x_grid, t_val)
+        if spatial_dim == 1:
+            # 1D: Use trapezoidal rule
+            num_integration_points = self.pinn_config.num_integration
+            x_grid = torch.linspace(
+                self.pinn_config.x_min,
+                self.pinn_config.x_max,
+                num_integration_points,
+                device=self.device,
+                dtype=self.dtype
+            ).unsqueeze(-1)  # [N, 1]
 
-        # Evaluate network on grid
-        with torch.no_grad():
-            p_values = self.network(x_grid, t_grid).squeeze()  # [N]
+            t_grid = torch.full((num_integration_points, 1), t_val, device=self.device, dtype=self.dtype)
 
-        # Trapezoidal integration
-        dx = (self.pinn_config.x_max - self.pinn_config.x_min) / (num_integration_points - 1)
-        integral = torch.trapezoid(p_values, dx=dx)
+            # Evaluate network on grid (concatenated input)
+            with torch.no_grad():
+                inputs = torch.cat([x_grid, t_grid], dim=-1)
+                p_values = self.network(inputs).squeeze()  # [N]
+
+            # Trapezoidal integration
+            dx = (self.pinn_config.x_max - self.pinn_config.x_min) / (num_integration_points - 1)
+            integral = torch.trapezoid(p_values, dx=dx)
+
+        else:
+            # Multi-D: Use Monte Carlo integration
+            num_mc_samples = self.pinn_config.num_mc_samples
+            x_mc = torch.rand(num_mc_samples, spatial_dim, device=self.device, dtype=self.dtype)
+            x_mc = self.pinn_config.x_min + (self.pinn_config.x_max - self.pinn_config.x_min) * x_mc
+            t_mc = torch.full((num_mc_samples, 1), t_val, device=self.device, dtype=self.dtype)
+
+            # Evaluate network (concatenated input)
+            with torch.no_grad():
+                inputs = torch.cat([x_mc, t_mc], dim=-1)
+                p_values = self.network(inputs).squeeze()  # [N]
+
+            # Monte Carlo estimate: (1/N) Σ p(x) * Volume
+            volume = (self.pinn_config.x_max - self.pinn_config.x_min) ** spatial_dim
+            integral = torch.mean(p_values) * volume
 
         # Normalization constraint
         loss = (integral - 1.0) ** 2
@@ -355,9 +398,9 @@ class PINNSolver:
 
         # Total loss (weighted sum)
         loss_total = (
-            loss_pde +
-            loss_ic +
-            loss_bc +
+            self.pinn_config.pde_weight * loss_pde +
+            self.pinn_config.ic_weight * loss_ic +
+            self.pinn_config.bc_weight * loss_bc +
             self.pinn_config.normalization_weight * loss_norm
         )
 
@@ -383,11 +426,15 @@ class PINNSolver:
         """
         self.network.train()
 
+        # Setup optimizer and scheduler at train time
+        self.optimizer = setup_optimizer(self.network.parameters(), self.training_config)
+        self.scheduler = setup_scheduler(self.optimizer, self.training_config)
+
         # Training header
         start_time = time.time()
         if self.training_config.verbose:
-            print(f"\n{'Epoch':<12} {'Loss':<12} {'PDE':<12} {'IC':<12} {'BC':<12} {'Time':<12}")
-            print("-" * 72)
+            print(f"\n{'Epoch':<12} {'Loss':<12} {'PDE':<12} {'IC':<12} {'BC':<12} {'LR':<12} {'Time':<12}")
+            print("-" * 84)
 
         for epoch in range(self.training_config.epochs):
             # Sample new collocation points each epoch
@@ -401,6 +448,10 @@ class PINNSolver:
 
             # Backward pass
             loss.backward()
+
+            # Compute gradient norm (before clipping)
+            total_grad_norm = compute_gradient_norm(self.network.parameters())
+            self.history['grad_norm'].append(total_grad_norm)
 
             # Gradient clipping
             if self.training_config.gradient_clip_val is not None:
@@ -424,19 +475,21 @@ class PINNSolver:
                 it_per_sec = (epoch + 1) / elapsed if elapsed > 0 else 0
                 epoch_str = f"{epoch}/{self.training_config.epochs}"
                 time_str = f"{it_per_sec:.2f}it/s"
+                current_lr = self.optimizer.param_groups[0]['lr']
                 print(
                     f"{epoch_str:<12} "
                     f"{loss.item():<12.4e} "
                     f"{self.history['loss_pde'][-1]:<12.4e} "
                     f"{self.history['loss_ic'][-1]:<12.4e} "
                     f"{self.history['loss_bc'][-1]:<12.4e} "
+                    f"{current_lr:<12.4e} "
                     f"{time_str:<12}"
                 )
 
         # Final summary
         if self.training_config.verbose:
             total_time = time.time() - start_time
-            print("-" * 72)
+            print("-" * 84)
             final_loss = self.history['loss_total'][-1]
             final_pde = self.history['loss_pde'][-1]
             final_ic = self.history['loss_ic'][-1]
@@ -478,84 +531,8 @@ class PINNSolver:
             x = x.to(device=self.device, dtype=self.dtype)
             t = t.to(device=self.device, dtype=self.dtype)
 
-            # Forward pass
-            u = self.network(x, t)
+            # Forward pass (concatenated input)
+            inputs = torch.cat([x, t], dim=-1)
+            u = self.network(inputs)
 
         return u
-
-    def evaluate_error(
-        self,
-        num_test_points: int = 1000
-    ) -> Dict[str, float]:
-        """
-        Evaluate solution error against analytical solution (if available).
-
-        Args:
-            num_test_points: Number of test points
-
-        Returns:
-            Dictionary of error metrics
-        """
-        # Sample test points
-        x_test = torch.linspace(
-            self.pinn_config.x_min,
-            self.pinn_config.x_max,
-            num_test_points,
-            device=self.device,
-            dtype=self.dtype
-        ).unsqueeze(-1)
-
-        t_test = self.pinn_config.T * torch.rand(num_test_points, 1, device=self.device, dtype=self.dtype)
-
-        # PINN prediction
-        u_pred = self.predict(x_test, t_test)
-
-        # Analytical solution
-        u_true = self.equation.analytical_solution(x_test, t_test)
-
-        if u_true is None:
-            logger.warning("No analytical solution available for error computation")
-            return {}
-
-        # Compute absolute errors 
-        abs_error = torch.abs(u_pred - u_true)
-
-        errors = {
-            'l2_error': torch.sqrt(torch.mean((u_pred - u_true) ** 2)).item(),
-            'max_abs_error': torch.max(abs_error).item(),
-            'mean_abs_error': torch.mean(abs_error).item(),
-        }
-
-        return errors
-
-    def save(self, filepath: str) -> None:
-        """
-        Save trained model and training history.
-
-        Args:
-            filepath: Path to save file (.pth)
-        """
-        torch.save({
-            'network_state_dict': self.network.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'history': self.history,
-            'pinn_config': self.pinn_config,
-            'training_config': self.training_config
-        }, filepath)
-
-        logger.info(f"Model saved to {filepath}")
-
-    def load(self, filepath: str) -> None:
-        """
-        Load trained model and training history.
-
-        Args:
-            filepath: Path to saved file (.pth)
-        """
-        checkpoint = torch.load(filepath, map_location=self.device)
-
-        self.network.load_state_dict(checkpoint['network_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.history = checkpoint['history']
-
-        logger.info(f"Model loaded from {filepath}")

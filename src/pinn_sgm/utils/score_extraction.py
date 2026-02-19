@@ -7,12 +7,10 @@ with score-based generative models.
 """
 
 import logging
-from typing import Optional, Callable, Union
+from typing import Optional
 import torch
 import torch.nn as nn
 import numpy as np
-
-from ..config import ScoreModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +38,24 @@ class ScoreExtractor:
         network: nn.Module,
         device: torch.device = torch.device('cpu'),
         dtype: torch.dtype = torch.float32,
-        epsilon: float = 1e-8
+        epsilon: float = 1e-8,
+        spatial_dim: int = None
     ):
         self.network = network
         self.device = device
         self.dtype = dtype
         self.epsilon = epsilon
+
+        # Infer spatial_dim from network if not provided
+        if spatial_dim is None:
+            if hasattr(network, 'spatial_dim'):
+                self.spatial_dim = network.spatial_dim
+            else:
+                raise ValueError(
+                    "spatial_dim must be provided if the network does not expose a spatial_dim attribute."
+                )
+        else:
+            self.spatial_dim = spatial_dim
 
         # Set network to evaluation mode
         self.network.eval()
@@ -60,11 +70,11 @@ class ScoreExtractor:
         Compute theoretical score s_theory(x, t) = ∇_x log p(x, t).
 
         Args:
-            x: Spatial coordinates [Batch, 1], requires_grad=True
+            x: Spatial coordinates [Batch, spatial_dim]
             t: Temporal coordinates [Batch, 1]
 
         Returns:
-            Score values [Batch, 1]
+            Score values [Batch, spatial_dim]
         """
         return self.compute_score(x, t)
 
@@ -77,36 +87,58 @@ class ScoreExtractor:
         Compute score function using automatic differentiation.
 
         The score is computed as:
-            s(x, t) = ∂/∂x log p(x, t) = (1/p) ∂p/∂x
+            s(x, t) = ∇_x log p(x, t) = (1/p) ∇_x p
+
+        Supports both 1D and multi-dimensional spatial inputs.
 
         Args:
-            x: Spatial coordinates [Batch, 1]
+            x: Spatial coordinates [Batch, spatial_dim]
             t: Temporal coordinates [Batch, 1]
 
         Returns:
-            Score [Batch, 1]
+            Score [Batch, spatial_dim]
         """
-        # Ensure gradients are enabled
-        # Clone and detach first to handle tensors created with no_grad()
-        x = x.detach().clone().requires_grad_(True)
+        # Enable gradients even if called within torch.no_grad() context
+        with torch.enable_grad():
+            # Clone and detach first to handle tensors created with no_grad()
+            x = x.detach().clone().requires_grad_(True)
+            t = t.detach().clone()  # t doesn't need gradients for score
 
-        # Forward pass: compute density
-        p = self.network(x, t)  # [Batch, 1]
+            # Forward pass: compute density (concatenated input)
+            inputs = torch.cat([x, t], dim=-1)
+            p = self.network(inputs)  # [Batch, 1]
 
-        # Compute gradient ∇_x p(x, t)
-        grad_p = torch.autograd.grad(
-            outputs=p,
-            inputs=x,
-            grad_outputs=torch.ones_like(p),
-            create_graph=True,
-            retain_graph=True
-        )[0]  # [Batch, 1]
+            # Compute gradient ∇_x p(x, t)
+            grad_p = torch.autograd.grad(
+                outputs=p,
+                inputs=x,
+                grad_outputs=torch.ones_like(p),
+                create_graph=True,
+                retain_graph=True
+            )[0]  # [Batch, spatial_dim]
 
-        # Score: s = (∇p) / p
-        # Add epsilon to denominator for numerical stability
-        score = grad_p / (p + self.epsilon)
+            # Score: s = (∇p) / p
+            # Add epsilon to denominator for numerical stability
+            score = grad_p / (p + self.epsilon)
 
         return score
+
+    def predict_score(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Alias for compute_score() for compatibility with visualization functions.
+
+        Args:
+            x: Spatial coordinates [Batch, spatial_dim]
+            t: Temporal coordinates [Batch, 1]
+
+        Returns:
+            Score [Batch, spatial_dim]
+        """
+        return self.compute_score(x, t)
 
     def evaluate_on_grid(
         self,
@@ -143,153 +175,3 @@ class ScoreExtractor:
 
         return x_grid.cpu().numpy(), scores.detach().cpu().numpy()
 
-
-def hybrid_score(
-    x: torch.Tensor,
-    t: torch.Tensor,
-    score_empirical: Union[torch.Tensor, Callable],
-    score_theoretical: Union[torch.Tensor, Callable],
-    config: ScoreModelConfig,
-    T: float = 1.0
-) -> torch.Tensor:
-    """
-    Compute hybrid score field combining empirical and theoretical scores.
-
-    The hybrid score is defined as:
-        ŝ(x, t) = (1 - φ_t) s_θ(x, t) + φ_t s_theory(x, t)
-
-    where:
-        - s_θ(x, t) is the empirical score learned from data
-        - s_theory(x, t) is the theoretical score from PINN
-        - φ_t ∈ [0, 1] is a time-dependent weight
-
-    The weight φ_t controls the trade-off between:
-        - Empirical flexibility (captures market idiosyncrasies)
-        - Theoretical consistency (enforces structural constraints)
-
-    Args:
-        x: Spatial coordinates [Batch, 1]
-        t: Time values [Batch, 1] or [Batch]
-        score_empirical: Empirical score s_θ(x, t) or function computing it
-        score_theoretical: Theoretical score s_theory(x, t) or function computing it
-        config: Score model configuration
-        T: Terminal time for normalization
-
-    Returns:
-        Hybrid score ŝ(x, t) [Batch, 1]
-        
-    Examples:
-        >>> config = ScoreModelConfig(phi_start=0.0, phi_end=1.0, interpolation='linear')
-        >>> # At t=0 (high data density): φ_0 = 0, use empirical score
-        >>> # At t=T (low data density): φ_T = 1, use theoretical score
-        >>> hybrid_s = hybrid_score(x, t, s_empirical, s_theoretical, config, T=1.0)
-    """
-    # Ensure proper tensor shape
-    if t.dim() == 2:
-        t = t.squeeze(-1)
-
-    # Compute time-dependent weights
-    t_normalized = t / T
-    phi_t = torch.zeros_like(t)
-
-    for i, t_val in enumerate(t_normalized):
-        phi_t[i] = config.get_phi(t_val.item(), T=1.0)
-
-    # Reshape phi_t for broadcasting
-    phi_t = phi_t.unsqueeze(-1)  # [Batch, 1]
-
-    # Compute scores (handle both tensor and callable inputs)
-    if callable(score_empirical):
-        s_emp = score_empirical(x, t)
-    else:
-        s_emp = score_empirical
-
-    if callable(score_theoretical):
-        s_th = score_theoretical(x, t)
-    else:
-        s_th = score_theoretical
-
-    # Hybrid score: (1 - φ_t) s_empirical + φ_t s_theoretical
-    s_hybrid = (1 - phi_t) * s_emp + phi_t * s_th
-
-    return s_hybrid
-
-
-class LangevinCorrector:
-    """
-    Modified Langevin dynamics corrector using hybrid scores.
-
-    Implements the corrector step in the Predictor-Corrector framework
-    for sampling from diffusion models, enhanced with theoretical scores.
-
-    The Langevin corrector step is:
-        x_{i+1} = x_i + ε ŝ(x_i, t) + √(2ε) z_i,    z_i ~ N(0, I)
-
-    where ŝ is the hybrid score combining empirical and theoretical components.
-
-    Args:
-        score_network: Empirical score network s_θ(x, t)
-        score_extractor: Theoretical score extractor s_theory(x, t)
-        config: Score model configuration
-        step_size: Langevin step size ε
-    """
-
-    def __init__(
-        self,
-        score_network: nn.Module,
-        score_extractor: ScoreExtractor,
-        config: ScoreModelConfig,
-        step_size: float = 1e-3
-    ):
-        self.score_network = score_network
-        self.score_extractor = score_extractor
-        self.config = config
-        self.step_size = step_size
-
-    def step(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        T: float = 1.0
-    ) -> torch.Tensor:
-        """
-        Perform one Langevin corrector step.
-
-        Args:
-            x: Current samples [Batch, dim]
-            t: Current time [Batch, 1] or scalar
-            T: Terminal time
-
-        Returns:
-            Updated samples [Batch, dim]
-        """
-        # Ensure proper shape
-        if isinstance(t, (int, float)):
-            t = torch.full((x.shape[0], 1), t, device=x.device, dtype=x.dtype)
-        elif t.dim() == 1:
-            t = t.unsqueeze(-1)
-
-        # Compute empirical score
-        s_empirical = self.score_network(x, t)
-
-        # Compute theoretical score
-        s_theoretical = self.score_extractor(x, t)
-
-        # Compute hybrid score
-        s_hybrid = hybrid_score(
-            x, t,
-            s_empirical,
-            s_theoretical,
-            self.config,
-            T
-        )
-
-        # Langevin dynamics step
-        noise = torch.randn_like(x)
-        x_next = x + self.step_size * s_hybrid + np.sqrt(2 * self.step_size) * noise
-
-        return x_next
-
-    def __call__(self, x: torch.Tensor, t: torch.Tensor, T: float = 1.0) -> torch.Tensor:
-        """Alias for step method."""
-        return self.step(x, t, T)

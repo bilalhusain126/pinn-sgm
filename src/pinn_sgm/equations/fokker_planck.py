@@ -9,51 +9,115 @@ from typing import Optional
 import torch
 import numpy as np
 
-from .base import BasePDE
-from ..config import MertonModelConfig
+from .base import BasePDE, BaseSDE
 
 
-class FokkerPlanckMerton(BasePDE):
+class FokkerPlanckMertonND(BasePDE, BaseSDE):
     """
-    Fokker-Planck equation for Merton structural credit risk model.
+    N-dimensional Fokker-Planck equation for multivariate Merton model.
 
-    The Merton model assumes firm asset value V_t follows Geometric Brownian Motion:
-        dV_t = μ V_t dt + σ V_t dW_t
+    The n-dimensional Merton model assumes:
+        dX_t = μ dt + Σ dW_t
 
-    In log-space X_t = ln(V_t), the dynamics become:
-        dX_t = (μ - σ²/2) dt + σ dW_t = α dt + σ dW_t
+    where:
+        X_t ∈ ℝⁿ: state vector
+        μ ∈ ℝⁿ: constant drift vector
+        Σ ∈ ℝⁿˣⁿ: constant volatility matrix
+        W_t ∈ ℝⁿ: n-dimensional Brownian motion
 
-    The probability density p(x, t) of X_t satisfies the Fokker-Planck equation:
-        ∂p/∂t + α ∂p/∂x - (σ²/2) ∂²p/∂x² = 0
+    The probability density p(x, t) satisfies the Fokker-Planck equation:
+        ∂p/∂t + μ·∇p - (1/2)∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ = 0
 
-    This is an advection-diffusion equation with:
-        - Drift coefficient: α = μ - σ²/2
-        - Diffusion coefficient: σ²/2
+    where D = ΣΣᵀ is the diffusion matrix.
+
+    For constant coefficients starting from x₀, the analytical solution is:
+        p(x, t) = 𝒩(x; x₀ + μt, Dt)
 
     Args:
-        config: Merton model configuration
-        x0: Initial log-asset value
+        spatial_dim: Dimension of state space (n)
+        mu: Drift vector [n] or scalar (broadcasted to all dimensions)
+        sigma: Volatility matrix [n, n] or vector [n] (diagonal) or scalar (isotropic)
+        x0: Initial state [n] or scalar (broadcasted)
         device: Computation device
         dtype: Tensor data type
+
+    Example:
+        >>> # 2D model with diagonal covariance
+        >>> equation = FokkerPlanckMertonND(
+        ...     spatial_dim=2,
+        ...     mu=[0.1, 0.05],
+        ...     sigma=[0.2, 0.3],  # diagonal: σ₁=0.2, σ₂=0.3
+        ...     x0=[0.0, 0.0]
+        ... )
     """
 
     def __init__(
         self,
-        config: MertonModelConfig,
-        x0: Optional[float] = None,
+        spatial_dim: int,
+        mu: Optional[float | list | np.ndarray] = None,
+        sigma: Optional[float | list | np.ndarray] = None,
+        x0: Optional[float | list | np.ndarray] = None,
         device: torch.device = torch.device('cpu'),
         dtype: torch.dtype = torch.float32
     ):
-        super().__init__(spatial_dim=1, device=device, dtype=dtype)
+        # Explicitly call BasePDE.__init__ to set shared attributes (spatial_dim, device, dtype).
+        # BaseSDE has an identical __init__ signature; calling BasePDE is sufficient since
+        # both set the same attributes.
+        BasePDE.__init__(self, spatial_dim=spatial_dim, device=device, dtype=dtype)
 
-        self.config = config
-        self.mu = config.mu
-        self.sigma = config.sigma
-        self.alpha = config.alpha  # Effective drift: μ - σ²/2
-        self.x0 = x0 if x0 is not None else config.x0
+        if spatial_dim < 1:
+            raise ValueError(f"spatial_dim must be >= 1, got {spatial_dim}")
 
-        # Diffusion coefficient (constant)
-        self.D = 0.5 * self.sigma ** 2
+        # Process drift vector μ
+        if mu is None:
+            mu = 0.0
+        if np.isscalar(mu):
+            mu = np.full(spatial_dim, mu)
+        else:
+            mu = np.asarray(mu)
+            if mu.shape != (spatial_dim,):
+                raise ValueError(f"mu must have shape ({spatial_dim},), got {mu.shape}")
+
+        self.mu = torch.tensor(mu, dtype=dtype, device=device)
+
+        # Process volatility matrix Σ
+        if sigma is None:
+            sigma = 1.0
+        if np.isscalar(sigma):
+            # Isotropic: Σ = σI
+            sigma = np.eye(spatial_dim) * sigma
+        else:
+            sigma = np.asarray(sigma)
+            if sigma.ndim == 1:
+                # Diagonal: Σ = diag(σ)
+                if sigma.shape != (spatial_dim,):
+                    raise ValueError(f"sigma vector must have shape ({spatial_dim},), got {sigma.shape}")
+                sigma = np.diag(sigma)
+            elif sigma.ndim == 2:
+                # Full matrix
+                if sigma.shape != (spatial_dim, spatial_dim):
+                    raise ValueError(
+                        f"sigma matrix must have shape ({spatial_dim}, {spatial_dim}), got {sigma.shape}"
+                    )
+            else:
+                raise ValueError(f"sigma must be scalar, vector, or matrix, got shape {sigma.shape}")
+
+        self.sigma = torch.tensor(sigma, dtype=dtype, device=device)
+
+        # Compute diffusion matrix D = ΣΣᵀ
+        self.D = torch.matmul(self.sigma, self.sigma.T)
+
+        # Process initial state x₀
+        if x0 is None:
+            x0 = 0.0
+        if np.isscalar(x0):
+            x0 = np.full(spatial_dim, x0)
+        else:
+            x0 = np.asarray(x0)
+            if x0.shape != (spatial_dim,):
+                raise ValueError(f"x0 must have shape ({spatial_dim},), got {x0.shape}")
+
+        self.x0 = torch.tensor(x0, dtype=dtype, device=device)
 
     def pde_residual(
         self,
@@ -65,50 +129,48 @@ class FokkerPlanckMerton(BasePDE):
         u_xx: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute Fokker-Planck PDE residual.
+        Compute n-dimensional Fokker-Planck PDE residual.
 
-        The FPE in conservative form:
-            ∂p/∂t = -∂/∂x(α p) + (σ²/2) ∂²p/∂x²
-
-        Expanding the drift term:
-            ∂p/∂t = -α ∂p/∂x + (σ²/2) ∂²p/∂x²
-
-        Residual form (should be zero):
-            R = ∂p/∂t + α ∂p/∂x - (σ²/2) ∂²p/∂x²
+        The n-D FPE:
+            ∂p/∂t + μ·∇p - (1/2)∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ = 0
 
         Args:
-            x: Spatial coordinates [Batch, 1]
+            x: Spatial coordinates [Batch, spatial_dim]
             t: Time coordinates [Batch, 1]
             u: Density p(x, t) [Batch, 1]
             u_t: Time derivative ∂p/∂t [Batch, 1]
-            u_x: Spatial derivative ∂p/∂x [Batch, 1]
-            u_xx: Second spatial derivative ∂²p/∂x² [Batch, 1]
+            u_x: Spatial gradient ∇p [Batch, spatial_dim]
+            u_xx: Hessian matrix [Batch, spatial_dim, spatial_dim]
 
         Returns:
             PDE residual [Batch, 1]
         """
-        # Advection term: α ∂p/∂x
-        advection = self.alpha * u_x
+        # Drift term: μ·∇p
+        # u_x shape: [Batch, spatial_dim]
+        # mu shape: [spatial_dim]
+        drift_term = torch.sum(self.mu * u_x, dim=-1, keepdim=True)  # [Batch, 1]
 
-        # Diffusion term: -(σ²/2) ∂²p/∂x²
-        diffusion = -self.D * u_xx
+        # Diffusion term: (1/2) ∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ
+        # u_xx shape: [Batch, spatial_dim, spatial_dim]
+        # D shape: [spatial_dim, spatial_dim]
+        # Contract: ∑ᵢⱼ Dᵢⱼ Hᵢⱼ = Tr(D @ H^T) = Tr(D @ H) (since H is symmetric)
+        diffusion_term = torch.einsum('ij,bij->b', self.D, u_xx).unsqueeze(-1)  # [Batch, 1]
+        diffusion_term = 0.5 * diffusion_term
 
-        # Residual: ∂p/∂t + α ∂p/∂x - (σ²/2) ∂²p/∂x²
-        residual = u_t + advection + diffusion
+        # Residual: ∂p/∂t + μ·∇p - (1/2)∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ
+        residual = u_t + drift_term - diffusion_term
 
         return residual
 
     def initial_condition(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Initial condition: Dirac delta at x_0.
+        Initial condition: Dirac delta at x₀.
 
-        For numerical stability, we approximate δ(x - x_0) with a narrow Gaussian:
-            p(x, 0) ≈ N(x; x_0, ε²) = (1/√(2πε²)) exp(-(x - x_0)²/(2ε²))
-
-        where ε is a small regularization parameter.
+        For numerical stability, we approximate δ(x - x₀) with a narrow Gaussian:
+            p(x, 0) ≈ 𝒩(x; x₀, ε²I)
 
         Args:
-            x: Spatial coordinates [Batch, 1]
+            x: Spatial coordinates [Batch, spatial_dim]
 
         Returns:
             Initial density [Batch, 1]
@@ -116,9 +178,10 @@ class FokkerPlanckMerton(BasePDE):
         epsilon = 0.01  # Regularization parameter
         variance = epsilon ** 2
 
-        # Gaussian approximation of delta function
-        coeff = 1.0 / np.sqrt(2 * np.pi * variance)
-        exponent = -(x - self.x0) ** 2 / (2 * variance)
+        # Multivariate Gaussian
+        diff = x - self.x0  # [Batch, spatial_dim]
+        exponent = -0.5 * torch.sum(diff ** 2, dim=-1, keepdim=True) / variance  # [Batch, 1]
+        coeff = 1.0 / ((2 * np.pi * variance) ** (self.spatial_dim / 2))
         p0 = coeff * torch.exp(exponent)
 
         return p0
@@ -129,42 +192,141 @@ class FokkerPlanckMerton(BasePDE):
         t: torch.Tensor
     ) -> torch.Tensor:
         """
-        Analytical solution of Fokker-Planck equation for constant coefficients.
+        Analytical solution: multivariate Gaussian.
 
-        For the advection-diffusion equation with constant α and D = σ²/2,
-        starting from δ(x - x_0), the solution is a Gaussian:
-
-            p(x, t) = N(x; μ_t, σ_t²)
-
-        where:
-            μ_t = x_0 + α t           (mean drifts linearly)
-            σ_t² = σ² t               (variance grows linearly)
+        For constant μ and D, starting from x₀, the solution is:
+            p(x, t) = 𝒩(x; x₀ + μt, Dt)
 
         Args:
-            x: Spatial coordinates [Batch, 1] or [Batch]
+            x: Spatial coordinates [Batch, spatial_dim]
             t: Time values [Batch, 1] or [Batch]
 
         Returns:
             Analytical density [Batch, 1]
         """
+        # Ensure proper shapes
         if x.dim() == 1:
-            x = x.unsqueeze(-1)
+            x = x.unsqueeze(0)  # [1, spatial_dim]
         if t.dim() == 1:
-            t = t.unsqueeze(-1)
+            t = t.unsqueeze(-1)  # [Batch, 1]
 
-        # Avoid t=0 to prevent division by zero
-        t = torch.clamp(t, min=1e-6)
+        # Avoid t=0
+        t_clamped = torch.clamp(t, min=1e-6)
 
-        # Time-evolved mean and variance
-        mu_t = self.x0 + self.alpha * t
-        var_t = self.sigma ** 2 * t
+        batch_size = x.shape[0]
 
-        # Gaussian density
-        coeff = 1.0 / torch.sqrt(torch.tensor(2 * np.pi) * var_t)
-        exponent = -(x - mu_t) ** 2 / (2 * var_t)
-        p = coeff * torch.exp(exponent)
+        # Time-evolved mean and covariance (per-sample)
+        mu_t = self.x0 + self.mu * t_clamped  # [Batch, spatial_dim]
 
-        return p
+        # Compute per-sample covariance: cov_t[b] = D * t[b]
+        # Reshape t for proper broadcasting: [Batch, 1] -> [Batch, 1, 1]
+        t_expanded = t_clamped.view(batch_size, 1, 1)  # [Batch, 1, 1]
+        # Expand D to batch dimension: [spatial_dim, spatial_dim] -> [Batch, spatial_dim, spatial_dim]
+        cov_t = self.D.unsqueeze(0) * t_expanded  # [Batch, spatial_dim, spatial_dim]
+
+        # Multivariate Gaussian PDF
+        # p(x) = (2π)^(-n/2) |Σ|^(-1/2) exp(-1/2 (x-μ)ᵀ Σ⁻¹ (x-μ))
+
+        diff = x - mu_t  # [Batch, spatial_dim]
+
+        # Compute determinant and inverse of covariance matrix (batched)
+        det_cov = torch.linalg.det(cov_t)  # [Batch]
+        inv_cov = torch.linalg.inv(cov_t)  # [Batch, spatial_dim, spatial_dim]
+
+        # Mahalanobis distance: (x-μ)ᵀ Σ⁻¹ (x-μ) (batched)
+        mahal = torch.einsum('bi,bij,bj->b', diff, inv_cov, diff)  # [Batch]
+
+        # Gaussian PDF
+        coeff = 1.0 / torch.sqrt((2 * np.pi) ** self.spatial_dim * det_cov)
+        p = coeff * torch.exp(-0.5 * mahal)
+
+        return p.unsqueeze(-1)  # [Batch, 1]
+
+    def drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute drift coefficient f(x, t) = μ (constant drift).
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            Drift vector μ [Batch, spatial_dim]
+        """
+        batch_size = x.shape[0]
+        # Expand constant drift to batch size
+        return self.mu.unsqueeze(0).expand(batch_size, -1)
+
+    def diffusion(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute diffusion coefficient G(x, t) = Σ (constant diffusion).
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            Diffusion matrix Σ [Batch, spatial_dim, spatial_dim]
+        """
+        batch_size = x.shape[0]
+        # Expand constant diffusion to batch size
+        return self.sigma.unsqueeze(0).expand(batch_size, -1, -1)
+
+    def diffusion_squared(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute D(x, t) = ΣΣᵀ (constant diffusion squared).
+
+        Overrides base class for efficiency since D is precomputed and constant.
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            D = ΣΣᵀ [Batch, spatial_dim, spatial_dim]
+        """
+        batch_size = x.shape[0]
+        # Expand precomputed D to batch size
+        return self.D.unsqueeze(0).expand(batch_size, -1, -1)
+
+    def is_constant_coefficients(self) -> bool:
+        """
+        Check if drift and diffusion are constant.
+
+        Returns:
+            True (Merton model has constant coefficients)
+        """
+        return True
+
+    def initial_score(self, x: torch.Tensor, t_epsilon: float = 0.1) -> torch.Tensor:
+        """
+        Initial score function for n-D Merton model.
+
+        For the Dirac delta initial condition p₀(x) = δ(x - x₀), we evaluate
+        the score at a small time t_ε to avoid the singularity at t=0.
+
+        At small time, the distribution is approximately Gaussian with mean x₀
+        and covariance D·t_ε, giving:
+            s₀(x) ≈ s(x, t_ε) = -(D·t_ε)⁻¹(x - x₀ - μ·t_ε)
+
+        Args:
+            x: Spatial coordinates [Batch, spatial_dim]
+            t_epsilon: Regularization time for Dirac delta (default: 0.1)
+
+        Returns:
+            Initial score s₀(x) [Batch, spatial_dim]
+        """
+        # Ensure proper shape
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        batch_size = x.shape[0]
+
+        # Evaluate at small time to regularize Dirac delta
+        t_small = torch.full((batch_size, 1), t_epsilon, device=self.device, dtype=self.dtype)
+
+        # Use analytical score at small time
+        return self.analytical_score(x, t_small)
 
     def analytical_score(
         self,
@@ -172,48 +334,51 @@ class FokkerPlanckMerton(BasePDE):
         t: torch.Tensor
     ) -> torch.Tensor:
         """
-        Analytical score function for the Merton model.
+        Analytical score function for n-D Merton model.
 
-        For the Gaussian density with mean μ_t = x_0 + α*t and variance σ²*t,
-        the score function (gradient of log-density) is:
-
-            s(x, t) = ∇_x log p(x, t) = -(x - μ_t) / (σ² t)
-
-        This provides exact ground truth for validating PINN and SGM scores.
+        For the Gaussian density with mean μ_t = x₀ + μt and covariance Dt,
+        the score function is:
+            s(x, t) = ∇_x log p(x, t) = -(Dt)⁻¹(x - x₀ - μt)
 
         Args:
-            x: Spatial coordinates [Batch, 1] or [Batch]
+            x: Spatial coordinates [Batch, spatial_dim]
             t: Time values [Batch, 1] or [Batch]
 
         Returns:
-            Score values [Batch, 1]
-
-        Example:
-            >>> equation = FokkerPlanckMerton(config)
-            >>> x = torch.tensor([[0.0], [1.0]])
-            >>> t = torch.tensor([[0.5], [0.5]])
-            >>> score = equation.analytical_score(x, t)
+            Score vectors [Batch, spatial_dim]
         """
+        # Ensure proper shapes
         if x.dim() == 1:
-            x = x.unsqueeze(-1)
+            x = x.unsqueeze(0)
         if t.dim() == 1:
             t = t.unsqueeze(-1)
 
-        # Avoid t=0 to prevent division by zero
-        t = torch.clamp(t, min=1e-6)
+        # Avoid t=0
+        t_clamped = torch.clamp(t, min=1e-6)
 
-        # Time-evolved mean and variance
-        mu_t = self.x0 + self.alpha * t
-        var_t = self.sigma ** 2 * t
+        batch_size = x.shape[0]
 
-        # Score: s(x, t) = -(x - μ_t) / (σ² t)
-        score = -(x - mu_t) / var_t
+        # Time-evolved mean and covariance (per-sample)
+        mu_t = self.x0 + self.mu * t_clamped  # [Batch, spatial_dim]
+
+        # Compute per-sample covariance: cov_t[b] = D * t[b]
+        # Reshape t for proper broadcasting: [Batch, 1] -> [Batch, 1, 1]
+        t_expanded = t_clamped.view(batch_size, 1, 1)  # [Batch, 1, 1]
+        # Expand D to batch dimension: [spatial_dim, spatial_dim] -> [Batch, spatial_dim, spatial_dim]
+        cov_t = self.D.unsqueeze(0) * t_expanded  # [Batch, spatial_dim, spatial_dim]
+
+        # Compute inverse covariance (batched)
+        inv_cov = torch.linalg.inv(cov_t)  # [Batch, spatial_dim, spatial_dim]
+
+        # Score: s(x, t) = -Σ⁻¹(x - μ_t) (batched)
+        diff = x - mu_t  # [Batch, spatial_dim]
+        score = -torch.einsum('bij,bj->bi', inv_cov, diff)  # [Batch, spatial_dim]
 
         return score
 
     def __repr__(self) -> str:
         """String representation."""
         return (
-            f"FokkerPlanckMerton(μ={self.mu:.4f}, σ={self.sigma:.4f}, "
-            f"α={self.alpha:.4f}, x0={self.x0:.4f})"
+            f"FokkerPlanckMertonND(spatial_dim={self.spatial_dim}, "
+            f"μ={self.mu.cpu().numpy()}, D_shape={self.D.shape})"
         )

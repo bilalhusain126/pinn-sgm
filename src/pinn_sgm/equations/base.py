@@ -1,8 +1,8 @@
 """
-Abstract base class for PDEs in PINN framework.
+Abstract base classes for PDEs and SDEs in PINN framework.
 
-Defines the interface for PDE equations to be solved using
-Physics-Informed Neural Networks.
+Defines the interface for equations to be solved using
+Physics-Informed Neural Networks and Score-PINN methods.
 """
 
 from abc import ABC, abstractmethod
@@ -133,3 +133,164 @@ class BasePDE(ABC):
     def __repr__(self) -> str:
         """String representation."""
         return f"{self.__class__.__name__}(spatial_dim={self.spatial_dim}, device={self.device})"
+
+
+class BaseSDE(ABC):
+    """
+    Abstract base class for Stochastic Differential Equations (SDEs).
+
+    An SDE has the general form:
+        dX_t = f(X_t, t) dt + G(X_t, t) dW_t
+
+    where:
+        - f(x, t) ∈ ℝⁿ is the drift coefficient
+        - G(x, t) ∈ ℝⁿˣᵐ is the diffusion coefficient
+        - W_t ∈ ℝᵐ is an m-dimensional Brownian motion
+
+    The probability density p(x, t) of X_t satisfies the Fokker-Planck equation:
+        ∂p/∂t + ∇·(f p) - (1/2)∑ᵢⱼ ∂²/∂xᵢ∂xⱼ[(GGᵀ)ᵢⱼ p] = 0
+
+    The score function s(x, t) = ∇ log p(x, t) satisfies the Score PDE:
+        ∂s/∂t = ∇{L[s(x,t)]}
+    where L[s] = (1/2)∇·(GGᵀs) + (1/2)||Gᵀs||² - ⟨A,s⟩ - ∇·A
+    and A = f - (1/2)∇·(GGᵀ)
+
+    This class is independent of BasePDE. Equations that need both the PDE
+    interface (for PINNSolver) and the SDE interface (for ScorePINNSolver)
+    should inherit from both: class MyEquation(BasePDE, BaseSDE).
+    """
+
+    def __init__(
+        self,
+        spatial_dim: int = 1,
+        device: torch.device = torch.device('cpu'),
+        dtype: torch.dtype = torch.float32
+    ):
+        self.spatial_dim = spatial_dim
+        self.device = device
+        self.dtype = dtype
+
+    def to_device(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Convert tensor to equation's device and dtype."""
+        return tensor.to(device=self.device, dtype=self.dtype)
+
+    @abstractmethod
+    def drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute drift coefficient f(x, t).
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            Drift vector f(x, t) [Batch, spatial_dim]
+        """
+        pass
+
+    @abstractmethod
+    def diffusion(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute diffusion coefficient G(x, t).
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            Diffusion matrix G(x, t) [Batch, spatial_dim, spatial_dim]
+            For diagonal diffusion, returns [Batch, spatial_dim, spatial_dim] diagonal matrix
+        """
+        pass
+
+    def diffusion_squared(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute D(x, t) = G(x, t) G(x, t)ᵀ.
+
+        Default implementation computes GGᵀ from diffusion().
+        Override for efficiency if D is known directly.
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            D(x, t) = GGᵀ [Batch, spatial_dim, spatial_dim]
+        """
+        G = self.diffusion(x, t)  # [Batch, spatial_dim, spatial_dim]
+        D = torch.bmm(G, G.transpose(-2, -1))  # GGᵀ
+        return D
+
+    @abstractmethod
+    def initial_score(self, x: torch.Tensor, t_epsilon: float = 0.1) -> torch.Tensor:
+        """
+        Compute initial score s₀(x) = ∇ₓ log p₀(x) at small time t_epsilon.
+
+        This is REQUIRED for Score-PINN training. It defines the initial condition
+        for the Score PDE: s(x, 0) = s₀(x).
+
+        For singular initial conditions (e.g., Dirac delta), the score is evaluated
+        at a small positive time t_epsilon to avoid singularities. For smooth initial
+        distributions, t_epsilon can be ignored and the score computed at t=0.
+
+        The initial score can be computed:
+        - Analytically (if p₀ has a closed form)
+        - Via automatic differentiation (if p₀ is differentiable)
+        - From samples using score matching
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t_epsilon: Regularization time for singular ICs (default: 0.1)
+
+        Returns:
+            Initial score s₀(x) [Batch, spatial_dim]
+
+        Example:
+            >>> # Gaussian initial condition: p₀ ~ N(μ₀, Σ₀)
+            >>> def initial_score(self, x, t_epsilon=0.1):
+            ...     # For smooth Gaussian, ignore t_epsilon
+            ...     return -self.Sigma0_inv @ (x - self.mu0)
+            >>>
+            >>> # Dirac delta: use t_epsilon for regularization
+            >>> def initial_score(self, x, t_epsilon=0.1):
+            ...     t_small = torch.full((x.shape[0], 1), t_epsilon)
+            ...     return self.analytical_score(x, t_small)
+        """
+        pass
+
+    def analytical_score(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """
+        Compute analytical score s(x, t) = ∇ₓ log p(x, t) for ALL t.
+
+        This is OPTIONAL and used only for validation and error computation.
+        If the full analytical solution is not available, return None.
+        Score-PINN will learn s(x, t) from the Score PDE.
+
+        Args:
+            x: State coordinates [Batch, spatial_dim]
+            t: Time values [Batch, 1]
+
+        Returns:
+            Score vector s(x, t) [Batch, spatial_dim] or None if not available
+
+        Example:
+            >>> # If analytical solution not available
+            >>> def analytical_score(self, x, t):
+            ...     return None  # Score-PINN will learn it!
+        """
+        return None
+
+    def is_constant_coefficients(self) -> bool:
+        """
+        Check if drift and diffusion are constant (independent of x and t).
+
+        Default implementation returns False. Override if coefficients are constant.
+
+        Returns:
+            True if f and G are constant, False otherwise
+        """
+        return False
