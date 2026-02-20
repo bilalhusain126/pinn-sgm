@@ -2,9 +2,7 @@
 Base Multi-Layer Perceptron architecture for PINN solvers.
 
 Implements a standard MLP with flexible configuration of layers and activations.
-For specialized networks, see:
-  - density_net.py: DensityMLP for probability density approximation
-  - score_net.py: ScoreNetwork for score function approximation
+For the density-specific wrapper, see density_net.py.
 """
 
 from typing import List, Literal, Optional
@@ -72,18 +70,6 @@ class MLP(nn.Module):
         output_activation: Optional[str] = None
     ):
         super().__init__()
-
-        if input_dim <= 0:
-            raise ValueError(f"input_dim must be positive, got {input_dim}")
-
-        if output_dim <= 0:
-            raise ValueError(f"output_dim must be positive, got {output_dim}")
-
-        if not hidden_dims:
-            raise ValueError("hidden_dims cannot be empty")
-
-        if any(dim <= 0 for dim in hidden_dims):
-            raise ValueError(f"All hidden dimensions must be positive, got {hidden_dims}")
 
         self.input_dim = input_dim
         self.output_dim = output_dim

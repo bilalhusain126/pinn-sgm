@@ -193,15 +193,6 @@ class DGM(nn.Module):
     ):
         super(DGM, self).__init__()
 
-        if input_dim <= 0:
-            raise ValueError(f"input_dim must be positive, got {input_dim}")
-        if output_dim <= 0:
-            raise ValueError(f"output_dim must be positive, got {output_dim}")
-        if not hidden_dims or len(hidden_dims) == 0:
-            raise ValueError(f"hidden_dims must be a non-empty list, got {hidden_dims}")
-        if any(dim <= 0 for dim in hidden_dims):
-            raise ValueError(f"All hidden dimensions must be positive, got {hidden_dims}")
-
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims

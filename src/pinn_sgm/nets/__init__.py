@@ -1,9 +1,5 @@
 """
-Neural network architectures for PINN solvers and score-based models.
-
-This module provides neural network architectures used to approximate
-PDE solutions in the Physics-Informed Neural Network framework and
-score functions for diffusion models.
+Neural network architectures for PINN solvers.
 
 Base Architectures:
   - MLP: Standard multi-layer perceptron
@@ -11,12 +7,10 @@ Base Architectures:
 
 Application-Specific Networks:
   - DensityNetwork: Wrapper for probability density approximation (ensures positivity)
-  - ScoreNetwork: For score function approximation in generative models
 """
 
 from .mlp import MLP
 from .dgm import DGM
 from .density_net import DensityNetwork
-from .score_net import ScoreNetwork
 
-__all__ = ['MLP', 'DGM', 'DensityNetwork', 'ScoreNetwork']
+__all__ = ['MLP', 'DGM', 'DensityNetwork']

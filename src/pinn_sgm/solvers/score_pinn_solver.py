@@ -182,8 +182,7 @@ class ScorePINNSolver:
             div_A = 0.0  # ∇·A = 0 for constant drift
         else:
             # State-dependent case: compute A = f - (1/2)∇·(GGᵀ)
-            # Warning: O(d²) autograd calls — very expensive for d > ~5.
-            # Prefer is_constant_coefficients() == True for high-dimensional problems.
+            # Warning: O(d²) autograd calls — very expensive in high dimensions.
             # (∇·D)ᵢ = Σⱼ ∂Dᵢⱼ/∂xⱼ
             div_D = torch.zeros(batch_size, self.spatial_dim, device=self.device, dtype=s.dtype)
             for i in range(self.spatial_dim):

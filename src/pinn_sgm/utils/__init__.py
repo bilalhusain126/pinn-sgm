@@ -1,10 +1,7 @@
 """
 Utility functions for PINN-SGM framework.
 
-This module provides utilities for score extraction and
-integration with diffusion models.
-
-Note: Visualization functions have been moved to pinn_sgm.visualizations package.
+  - ScoreExtractor: Extract score ∇_x log p(x,t) from a trained density PINN
 """
 
 from .score_extraction import ScoreExtractor

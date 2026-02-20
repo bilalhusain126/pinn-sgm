@@ -14,7 +14,7 @@ To apply publication-quality styling, call:
 from ._style import setup_publication_style
 from .plot_training import plot_training_history
 from .plot_evaluation import plot_density_evolution, plot_score_field
-from .plot_analysis import plot_error_analysis, plot_score_magnitude_analysis
+from .plot_analysis import plot_error_analysis, plot_score_mse
 
 __all__ = [
     'setup_publication_style',
@@ -22,5 +22,5 @@ __all__ = [
     'plot_density_evolution',
     'plot_score_field',
     'plot_error_analysis',
-    'plot_score_magnitude_analysis',
+    'plot_score_mse',
 ]

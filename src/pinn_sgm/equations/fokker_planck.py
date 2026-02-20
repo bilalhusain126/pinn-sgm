@@ -65,9 +65,6 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         # both set the same attributes.
         BasePDE.__init__(self, spatial_dim=spatial_dim, device=device, dtype=dtype)
 
-        if spatial_dim < 1:
-            raise ValueError(f"spatial_dim must be >= 1, got {spatial_dim}")
-
         # Process drift vector μ
         if mu is None:
             mu = 0.0
