@@ -51,16 +51,16 @@ def plot_density_evolution(
     if dim < 0 or dim >= spatial_dim:
         raise ValueError(f"dim must be in range [0, {spatial_dim-1}], got {dim}")
 
-    # Create spatial grid along specified dimension
+    # --- Spatial grid ---
     x_vals = torch.linspace(x_range[0], x_range[1], num_points, device=device)
 
-    # Create fixed values for other dimensions
+    # --- Fixed values for other dimensions ---
     if fixed_values is None:
         fixed_values = torch.zeros(spatial_dim, device=device)
     elif fixed_values.shape[0] != spatial_dim:
         raise ValueError(f"fixed_values must have shape ({spatial_dim},), got {fixed_values.shape}")
 
-    # Create figure
+    # --- Figure ---
     fig, axes = plt.subplots(1, len(time_points), figsize=figsize)
     if len(time_points) == 1:
         axes = [axes]
@@ -68,26 +68,26 @@ def plot_density_evolution(
     network.eval()
     with torch.no_grad():
         for idx, t_val in enumerate(time_points):
-            # Create input: vary dimension `dim`, fix others
+            # --- Input preparation ---
             x_input = fixed_values.unsqueeze(0).repeat(num_points, 1)  # [num_points, spatial_dim]
-            x_input[:, dim] = x_vals  # Vary the specified dimension
+            x_input[:, dim] = x_vals
 
             t_input = torch.full((num_points, 1), t_val, device=device)
 
-            # PINN prediction
+            # --- PINN prediction ---
             inputs = torch.cat([x_input, t_input], dim=-1)
             p_pred = network(inputs).squeeze().cpu().numpy()
 
-            # Plot PINN solution
+            # --- Plot PINN ---
             x_plot = x_vals.cpu().numpy()
             axes[idx].plot(x_plot, p_pred, 'b-', linewidth=2, label='PINN')
 
-            # Plot analytical solution if available
+            # --- Analytical solution ---
             if analytical_solution is not None:
                 p_true = analytical_solution(x_input, t_input).squeeze().cpu().numpy()
                 axes[idx].plot(x_plot, p_true, 'r--', linewidth=2, label='Analytical', alpha=0.7)
 
-            # Labels
+            # --- Labels ---
             if spatial_dim == 1:
                 x_label = '$x$'
             else:
@@ -98,7 +98,7 @@ def plot_density_evolution(
             axes[idx].set_title(f'$t = {t_val:.2f}$')
             axes[idx].legend()
 
-    # Add subtitle if multidimensional
+    # --- Multidimensional title ---
     if spatial_dim > 1:
         other_dims = [f'$x_{{{i+1}}}={fixed_values[i].item():.1f}$'
                       for i in range(spatial_dim) if i != dim]
@@ -150,46 +150,46 @@ def plot_score_field(
     if dim < 0 or dim >= spatial_dim:
         raise ValueError(f"dim must be in range [0, {spatial_dim-1}], got {dim}")
 
-    # Create spatial grid along specified dimension
+    # --- Spatial grid ---
     x_vals = torch.linspace(x_range[0], x_range[1], num_points, device=device)
 
-    # Create fixed values for other dimensions
+    # --- Fixed values for other dimensions ---
     if fixed_values is None:
         fixed_values = torch.zeros(spatial_dim, device=device)
     elif fixed_values.shape[0] != spatial_dim:
         raise ValueError(f"fixed_values must have shape ({spatial_dim},), got {fixed_values.shape}")
 
-    # Create figure
+    # --- Figure ---
     fig, axes = plt.subplots(1, len(time_points), figsize=figsize)
     if len(time_points) == 1:
         axes = [axes]
 
     for idx, t_val in enumerate(time_points):
-        # Create input: vary dimension `dim`, fix others
+        # --- Input preparation ---
         x_input = fixed_values.unsqueeze(0).repeat(num_points, 1)  # [num_points, spatial_dim]
-        x_input[:, dim] = x_vals  # Vary the specified dimension
+        x_input[:, dim] = x_vals
 
         t_input = torch.full((num_points, 1), t_val, device=device)
 
-        # Compute score
+        # --- Compute score ---
         with torch.no_grad():
             s_pred = solver.predict_score(x_input, t_input).cpu().numpy()  # [num_points, spatial_dim]
             s_true = equation.analytical_score(x_input, t_input)  # [num_points, spatial_dim] or None
 
-        # Extract component for the varying dimension
+        # --- Extract dimension component ---
         s_pred_dim = s_pred[:, dim]
 
-        # Plot
+        # --- Plot ---
         x_plot = x_vals.cpu().numpy()
 
-        # Only plot analytical solution if available
+        # --- Analytical solution ---
         if s_true is not None:
             s_true_dim = s_true.cpu().numpy()[:, dim]
             axes[idx].plot(x_plot, s_true_dim, 'b-', linewidth=2, label='Analytical')
 
         axes[idx].plot(x_plot, s_pred_dim, 'r--', linewidth=2, label='Predicted', alpha=0.8)
 
-        # Labels
+        # --- Labels ---
         if spatial_dim == 1:
             x_label = '$x$'
             y_label = r'$s(x, t)$'
@@ -202,11 +202,11 @@ def plot_score_field(
         axes[idx].set_title(f'$t = {t_val:.2f}$')
         axes[idx].legend(fontsize=10)
 
-        # Apply y-axis limits if specified
+        # --- Y-axis limits ---
         if y_range is not None:
             axes[idx].set_ylim(y_range)
 
-        # Add error text (only when analytical solution is available)
+        # --- Error annotation ---
         if s_true is not None:
             abs_error = np.abs(s_pred_dim - s_true_dim)
             rel_error = np.mean(abs_error) / (np.mean(np.abs(s_true_dim)) + 1e-10)
@@ -216,7 +216,7 @@ def plot_score_field(
                            transform=axes[idx].transAxes, verticalalignment='top',
                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.75), fontsize=9)
 
-    # Add subtitle if multidimensional
+    # --- Multidimensional title ---
     if spatial_dim > 1:
         other_dims = [f'$x_{{{i+1}}}={fixed_values[i].item():.1f}$'
                       for i in range(spatial_dim) if i != dim]

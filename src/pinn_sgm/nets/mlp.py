@@ -77,26 +77,24 @@ class MLP(nn.Module):
         self.activation_name = activation
         self.output_activation_name = output_activation
 
-        # Build network layers
+        # --- Build network layers ---
         layers = []
         in_dim = input_dim
 
-        # Hidden layers
+        # --- Hidden layers ---
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(in_dim, hidden_dim))
             layers.append(_get_activation(activation))
             in_dim = hidden_dim
 
-        # Output layer (no activation by default)
+        # --- Output layer ---
         layers.append(nn.Linear(in_dim, output_dim))
-
-        # Optional output activation
         if output_activation is not None:
             layers.append(_get_activation(output_activation))
 
         self.model = nn.Sequential(*layers)
 
-        # Initialize weights
+        # --- Initialize weights ---
         self._initialize_weights()
 
     def _initialize_weights(self):

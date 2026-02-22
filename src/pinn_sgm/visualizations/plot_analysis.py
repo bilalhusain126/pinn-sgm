@@ -41,34 +41,34 @@ def plot_error_analysis(
     Returns:
         Matplotlib figure
     """
-    # Create meshgrid
+    # --- Meshgrid ---
     x = torch.linspace(x_range[0], x_range[1], num_x_points, device=device)
     t = torch.linspace(t_range[0], t_range[1], num_t_points, device=device)
     X, T = torch.meshgrid(x, t, indexing='ij')
 
-    # Flatten for evaluation
+    # --- Flatten inputs ---
     x_flat = X.flatten().unsqueeze(-1)
     t_flat = T.flatten().unsqueeze(-1)
 
-    # PINN prediction
+    # --- PINN prediction ---
     network.eval()
     with torch.no_grad():
         inputs = torch.cat([x_flat, t_flat], dim=-1)
         p_pred = network(inputs).squeeze()
         p_true = analytical_solution(x_flat, t_flat).squeeze()
 
-    # Compute absolute error
+    # --- Absolute error ---
     abs_error = torch.abs(p_pred - p_true)
 
-    # Reshape
+    # --- Reshape for plotting ---
     abs_error = abs_error.reshape(num_x_points, num_t_points).cpu().numpy()
     X_np = X.cpu().numpy()
     T_np = T.cpu().numpy()
 
-    # Create figure
+    # --- Figure ---
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Absolute error heatmap
+    # --- Heatmap ---
     im = ax.contourf(T_np, X_np, abs_error, levels=50, cmap='viridis')
     ax.set_xlabel('$t$')
     ax.set_ylabel('$x$')

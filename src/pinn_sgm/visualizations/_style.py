@@ -27,11 +27,11 @@ def setup_publication_style():
     - Thinner line widths for axes
     """
     plt.rcParams.update({
-        # Font configuration - STIX (LaTeX-like, widely available)
+        # --- Font configuration: STIX (LaTeX-like, widely available) ---
         'font.family': 'STIXGeneral',
         'mathtext.fontset': 'stix',
 
-        # Font sizes - reasonable and consistent
+        # --- Font sizes ---
         'axes.labelsize': 11,
         'axes.titlesize': 12,
         'xtick.labelsize': 10,
@@ -39,13 +39,13 @@ def setup_publication_style():
         'legend.fontsize': 10,
         'figure.titlesize': 13,
 
-        # Axes styling - clean and minimal
+        # --- Axes styling: clean and minimal ---
         'axes.linewidth': 0.8,
         'axes.grid': False,
         'axes.spines.top': False,
         'axes.spines.right': False,
 
-        # Figure defaults
+        # --- Figure defaults ---
         'figure.figsize': (12, 8),
         'figure.dpi': 100,
         'savefig.dpi': 300,

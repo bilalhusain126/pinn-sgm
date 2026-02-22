@@ -53,11 +53,10 @@ class DensityNetwork(nn.Module):
         self.use_softplus = use_softplus
         self.spatial_dim = spatial_dim
 
-        # Output activation for positivity
+        # --- Output activation for positivity ---
         if use_softplus:
             self.output_activation = nn.Softplus()
         else:
-            # Use exp as a function, not a module
             self.output_activation = lambda x: torch.exp(x)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -71,10 +70,10 @@ class DensityNetwork(nn.Module):
         Returns:
             Density values of shape [Batch, 1], guaranteed positive
         """
-        # Forward through base network
+        # --- Base network forward pass ---
         z = self.base_network(inputs)  # [Batch, 1]
 
-        # Apply output activation for positivity
+        # --- Positivity constraint ---
         p = self.output_activation(z)  # [Batch, 1]
 
         return p

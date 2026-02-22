@@ -33,11 +33,11 @@ def plot_training_history(
 
     epochs = range(len(history['loss_total']))
 
-    # Detect solver type based on keys
+    # --- Detect solver type ---
     is_score_pinn = 'loss_initial' in history and 'loss_residual' in history
     is_vanilla_pinn = 'loss_pde' in history and 'loss_ic' in history
 
-    # Total loss (always present)
+    # --- Total loss ---
     axes[0, 0].plot(epochs, history['loss_total'], 'b-', linewidth=1.5)
     axes[0, 0].set_xlabel('Epoch')
     axes[0, 0].set_ylabel(r'$\mathcal{L}_{\mathrm{total}}$')
@@ -45,14 +45,14 @@ def plot_training_history(
     axes[0, 0].set_yscale('log')
 
     if is_score_pinn:
-        # Score-PINN: Initial condition loss
+        # --- Score-PINN: Initial condition loss ---
         axes[0, 1].plot(epochs, history['loss_initial'], 'orange', linewidth=1.5)
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel(r'$\mathcal{L}_{\mathrm{initial}}$')
         axes[0, 1].set_title('Initial Condition Loss')
         axes[0, 1].set_yscale('log')
 
-        # Score-PINN: Residual loss
+        # --- Score-PINN: Residual loss ---
         axes[1, 0].plot(epochs, history['loss_residual'], 'green', linewidth=1.5)
         axes[1, 0].set_xlabel('Epoch')
         axes[1, 0].set_ylabel(r'$\mathcal{L}_{\mathrm{residual}}$')
@@ -60,14 +60,14 @@ def plot_training_history(
         axes[1, 0].set_yscale('log')
 
     elif is_vanilla_pinn:
-        # Vanilla PINN: PDE loss
+        # --- Vanilla PINN: PDE loss ---
         axes[0, 1].plot(epochs, history['loss_pde'], 'r-', linewidth=1.5)
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel(r'$\mathcal{L}_{\mathrm{PDE}}$')
         axes[0, 1].set_title('PDE Residual Loss')
         axes[0, 1].set_yscale('log')
 
-        # Vanilla PINN: IC and BC losses
+        # --- Vanilla PINN: IC and BC losses ---
         axes[1, 0].plot(epochs, history['loss_ic'], 'g-', linewidth=1.5, label='IC')
         axes[1, 0].plot(epochs, history['loss_bc'], 'm-', linewidth=1.5, label='BC')
         axes[1, 0].set_xlabel('Epoch')
@@ -77,10 +77,10 @@ def plot_training_history(
         axes[1, 0].legend()
 
     else:
-        # Fallback: plot whatever losses are available
+        # --- Fallback: available losses ---
         logger.warning("Could not auto-detect solver type. Plotting available losses.")
         loss_keys = [k for k in history.keys() if k.startswith('loss_') and k != 'loss_total']
-        for idx, key in enumerate(loss_keys[:2]):  # Plot up to 2 additional losses
+        for idx, key in enumerate(loss_keys[:2]):
             ax = axes[0, 1] if idx == 0 else axes[1, 0]
             ax.plot(epochs, history[key], linewidth=1.5)
             ax.set_xlabel('Epoch')
@@ -88,7 +88,7 @@ def plot_training_history(
             ax.set_title(key.replace('_', ' ').title())
             ax.set_yscale('log')
 
-    # Gradient norm (always present)
+    # --- Gradient norm ---
     if 'grad_norm' in history:
         axes[1, 1].plot(epochs, history['grad_norm'], 'purple', linewidth=1.5)
         axes[1, 1].set_xlabel('Epoch')

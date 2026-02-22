@@ -46,7 +46,7 @@ class ScoreExtractor:
         self.dtype = dtype
         self.epsilon = epsilon
 
-        # Infer spatial_dim from network if not provided
+        # --- Spatial dimension ---
         if spatial_dim is None:
             if hasattr(network, 'spatial_dim'):
                 self.spatial_dim = network.spatial_dim
@@ -57,7 +57,7 @@ class ScoreExtractor:
         else:
             self.spatial_dim = spatial_dim
 
-        # Set network to evaluation mode
+        # --- Evaluation mode ---
         self.network.eval()
         self.network.to(device=device, dtype=dtype)
 
@@ -98,17 +98,17 @@ class ScoreExtractor:
         Returns:
             Score [Batch, spatial_dim]
         """
-        # Enable gradients even if called within torch.no_grad() context
+        # --- Enable gradients ---
         with torch.enable_grad():
-            # Clone and detach first to handle tensors created with no_grad()
+            # --- Prepare inputs ---
             x = x.detach().clone().requires_grad_(True)
-            t = t.detach().clone()  # t doesn't need gradients for score
+            t = t.detach().clone()
 
-            # Forward pass: compute density (concatenated input)
+            # --- Density forward pass ---
             inputs = torch.cat([x, t], dim=-1)
             p = self.network(inputs)  # [Batch, 1]
 
-            # Compute gradient ∇_x p(x, t)
+            # --- Gradient ∇_x p ---
             grad_p = torch.autograd.grad(
                 outputs=p,
                 inputs=x,
@@ -117,8 +117,7 @@ class ScoreExtractor:
                 retain_graph=True
             )[0]  # [Batch, spatial_dim]
 
-            # Score: s = (∇p) / p
-            # Add epsilon to denominator for numerical stability
+            # --- Score: s = (∇p) / p ---
             score = grad_p / (p + self.epsilon)
 
         return score
@@ -162,15 +161,15 @@ class ScoreExtractor:
             x_grid: Spatial coordinates [num_points]
             scores: Score values [num_points]
         """
-        # Create grid
+        # --- Create grid ---
         x_grid = torch.linspace(x_min, x_max, num_points, device=self.device, dtype=self.dtype)
         t_grid = torch.full((num_points,), t_value, device=self.device, dtype=self.dtype)
 
-        # Reshape for network
+        # --- Reshape for network ---
         x_input = x_grid.unsqueeze(-1)
         t_input = t_grid.unsqueeze(-1)
 
-        # Compute scores (requires gradients, so no torch.no_grad())
+        # --- Compute scores ---
         scores = self.compute_score(x_input, t_input).squeeze()
 
         return x_grid.cpu().numpy(), scores.detach().cpu().numpy()

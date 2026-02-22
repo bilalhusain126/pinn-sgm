@@ -34,29 +34,29 @@ class LSTMLayer(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
 
-        # Activation functions
+        # --- Activation functions ---
         self.trans1 = self._get_activation(trans1)
         self.trans2 = self._get_activation(trans2)
 
-        # Input transformation weights (U matrices)
+        # --- Input transformation weights (U matrices) ---
         self.Uz = nn.Parameter(torch.Tensor(input_dim, output_dim))
         self.Ug = nn.Parameter(torch.Tensor(input_dim, output_dim))
         self.Ur = nn.Parameter(torch.Tensor(input_dim, output_dim))
         self.Uh = nn.Parameter(torch.Tensor(input_dim, output_dim))
 
-        # State transformation weights (W matrices)
+        # --- State transformation weights (W matrices) ---
         self.Wz = nn.Parameter(torch.Tensor(output_dim, output_dim))
         self.Wg = nn.Parameter(torch.Tensor(output_dim, output_dim))
         self.Wr = nn.Parameter(torch.Tensor(output_dim, output_dim))
         self.Wh = nn.Parameter(torch.Tensor(output_dim, output_dim))
 
-        # Biases
+        # --- Biases ---
         self.bz = nn.Parameter(torch.zeros(output_dim))
         self.bg = nn.Parameter(torch.zeros(output_dim))
         self.br = nn.Parameter(torch.zeros(output_dim))
         self.bh = nn.Parameter(torch.zeros(output_dim))
 
-        # Initialize weights
+        # --- Initialize weights ---
         self.reset_parameters()
 
     def _get_activation(self, activation_type: str):
@@ -86,13 +86,13 @@ class LSTMLayer(nn.Module):
         Returns:
             Updated hidden state [Batch, output_dim]
         """
-        # Gate computations
+        # --- Gate computations ---
         Z = self.trans1(X @ self.Uz + S @ self.Wz + self.bz)  # Update gate
         G = self.trans1(X @ self.Ug + S @ self.Wg + self.bg)  # Forget gate
         R = self.trans1(X @ self.Ur + S @ self.Wr + self.br)  # Reset gate
         H = self.trans2(X @ self.Uh + (S * R) @ self.Wh + self.bh)  # Candidate
 
-        # Update state: S_new = (1-G)⊙H + Z⊙S
+        # --- Update state: S_new = (1-G)⊙H + Z⊙S ---
         S_new = (1 - G) * H + Z * S
         return S_new
 
@@ -112,14 +112,14 @@ class DenseLayer(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
 
-        # Linear transformation
+        # --- Linear transformation ---
         self.W = nn.Parameter(torch.Tensor(input_dim, output_dim))
         self.b = nn.Parameter(torch.zeros(output_dim))
 
-        # Activation function
+        # --- Activation function ---
         self.activation = self._get_activation(activation)
 
-        # Initialize weights
+        # --- Initialize weights ---
         self.reset_parameters()
 
     def _get_activation(self, activation_type: str):
@@ -198,23 +198,22 @@ class DGM(nn.Module):
         self.hidden_dims = hidden_dims
         self.n_layers = len(hidden_dims)
 
-        # Initial transformation: input → first hidden state
+        # --- Initial transformation: input → first hidden state ---
         self.initial_layer = DenseLayer(input_dim, hidden_dims[0], activation=activation)
 
-        # LSTM layers with gating (possibly varying widths)
+        # --- LSTM layers with gating (possibly varying widths) ---
         self.lstm_layers = nn.ModuleList([
             LSTMLayer(input_dim, hidden_dims[i], trans1="tanh", trans2=activation)
             for i in range(self.n_layers)
         ])
 
-        # Projection layers for dimension changes between LSTM layers
-        # If hidden_dims[i] != hidden_dims[i+1], we need a projection
+        # --- Projection layers for dimension changes between LSTM layers ---
         self.projection_layers = nn.ModuleList([
             nn.Linear(hidden_dims[i], hidden_dims[i + 1]) if hidden_dims[i] != hidden_dims[i + 1] else None
             for i in range(self.n_layers - 1)
         ])
 
-        # Final transformation: last hidden state → output
+        # --- Final transformation: last hidden state → output ---
         self.final_layer = DenseLayer(hidden_dims[-1], output_dim, activation=final_activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -229,18 +228,16 @@ class DGM(nn.Module):
             Output tensor [Batch, output_dim]
             For Score-PINN: score vector
         """
-        # Initial transformation
+        # --- Initial transformation ---
         S = self.initial_layer(x)
 
-        # Pass through LSTM layers with optional projections
+        # --- LSTM forward pass with optional projections ---
         for i, lstm_layer in enumerate(self.lstm_layers):
             S = lstm_layer(S, x)
-
-            # Apply projection if dimensions change before next layer
             if i < len(self.projection_layers) and self.projection_layers[i] is not None:
                 S = self.projection_layers[i](S)
 
-        # Final output
+        # --- Output ---
         out = self.final_layer(S)
         return out
 

@@ -1,7 +1,7 @@
 """
-Configuration dataclasses for PINN solvers and training.
+Configuration dataclasses for PINN solvers, score models, and training.
 
-This module defines configuration objects using Python dataclasses with
+This module defines all configuration objects using Python dataclasses with
 post-initialization validation to ensure parameter consistency.
 """
 
@@ -223,3 +223,37 @@ class ScorePINNConfig:
     def t_max(self) -> float:
         """Maximum time."""
         return self.t_range[1]
+
+
+@dataclass
+class DSMConfig:
+    """
+    Configuration for Denoising Score Matching (DSM) training.
+
+    Implements the continuous-time DSM objective (Song et al. 2021, Eq. 7).
+    The trainer is equation-agnostic: it accepts any ForwardSDE and any
+    score network, and takes external data (x0_data) rather than simulating
+    paths internally.
+
+    Attributes:
+        batch_size:      Training batch size (drawn from x0_data each epoch)
+        n_epochs:        Number of training epochs
+        lr:              Adam learning rate
+        weight_decay:    Adam weight decay
+        lr_decay_step:   StepLR step size (epochs)
+        lr_decay_gamma:  StepLR multiplicative decay factor
+        T:               Terminal diffusion time
+        t_eps:           Minimum time to sample (avoids t≈0 score singularity)
+        lambda_physics:  Method A: weight on physics penalty (0 = disabled)
+        log_every:       Log loss every this many epochs
+    """
+    batch_size: int = 512
+    n_epochs: int = 1000
+    lr: float = 1e-3
+    weight_decay: float = 1e-5
+    lr_decay_step: int = 500
+    lr_decay_gamma: float = 0.5
+    T: float = 1.0
+    t_eps: float = 0.01
+    lambda_physics: float = 0.0
+    log_every: int = 100

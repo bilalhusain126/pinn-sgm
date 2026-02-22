@@ -56,6 +56,7 @@ from . import equations
 from . import solvers
 from . import nets
 from . import utils
+from . import sgm
 
 __all__ = [
     'config',
@@ -63,5 +64,6 @@ __all__ = [
     'solvers',
     'nets',
     'utils',
+    'sgm',
     'setup_logging',
 ]

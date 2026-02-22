@@ -1,10 +1,6 @@
 """
 Score-PINN solver for Stochastic Differential Equations (SDEs).
 
-Based on: "Score-Based Physics-Informed Neural Networks for High-Dimensional
-Fokker-Planck Equations" by Hu et al. (2024)
-arXiv:2402.07465
-
 Learns the score function s(x,t) = ∇ log p(x,t) by solving the Score PDE
 using physics-informed neural networks. The learned score can be used for
 score-based generative modeling and sampling.
@@ -119,27 +115,21 @@ class ScorePINNSolver:
         """
         batch_size = x.shape[0]
 
-        # Get drift and diffusion from equation (supports state-dependent coefficients)
+        # --- SDE coefficients ---
         f = self.equation.drift(x, t)                    # [Batch, spatial_dim]
         G = self.equation.diffusion(x, t)                # [Batch, spatial_dim, spatial_dim]
         D = torch.bmm(G, G.transpose(-2, -1))            # D = GGᵀ [Batch, spatial_dim, spatial_dim]
 
-        # Term 1: (1/2)∇·(Ds)
-        # Compute Ds = D @ s
+        # --- Term 1: (1/2)∇·(Ds) ---
         Ds = torch.bmm(D, s.unsqueeze(-1)).squeeze(-1)  # [Batch, spatial_dim]
 
         if self.config.use_hte:
-            # Use Hutchinson Trace Estimation (HTE)
-            # HTE: Tr(∇f) ≈ E[v^T ∇f v] where v ~ Rademacher(±1)
-            # This replaces O(batch_size * spatial_dim) gradient computations with O(n_samples)
-
+            # --- Hutchinson Trace Estimation: Tr(∇Ds) ≈ E[vᵀ ∇Ds v], v ~ Rademacher ---
             div_Ds_estimates = []
             for _ in range(self.config.n_hte_samples):
-                # Sample Rademacher vector: each element is ±1 with equal probability
                 v = torch.randint(0, 2, (batch_size, self.spatial_dim), device=self.device, dtype=s.dtype)
-                v = 2.0 * v - 1.0  # Convert {0,1} to {-1,1}
+                v = 2.0 * v - 1.0  # {0,1} → {-1,+1}
 
-                # Compute v^T ∇(Ds) using vector-Jacobian product
                 vjp = torch.autograd.grad(
                     Ds,
                     x,
@@ -148,13 +138,11 @@ class ScorePINNSolver:
                     retain_graph=True
                 )[0]  # [Batch, spatial_dim]
 
-                # HTE estimate: Tr(∇Ds) ≈ v^T (∇Ds) v = sum(v * vjp)
                 div_Ds_estimates.append((v * vjp).sum(dim=-1))  # [Batch]
 
-            # Average over samples
             div_Ds = torch.stack(div_Ds_estimates).mean(dim=0)  # [Batch]
         else:
-            # Exact computation (expensive for high dimensions)
+            # --- Exact divergence (expensive for high dimensions) ---
             div_Ds = torch.zeros(batch_size, device=self.device)
             for j in range(self.spatial_dim):
                 grad_Ds_j = torch.autograd.grad(
@@ -167,23 +155,17 @@ class ScorePINNSolver:
 
         term1 = 0.5 * div_Ds
 
-        # Term 2: (1/2)||Gᵀs||² = (1/2)sᵀDs where D = GGᵀ
-        # Since D = GGᵀ, we have ||Gᵀs||² = (Gᵀs)ᵀ(Gᵀs) = sᵀGGᵀs = sᵀDs
-        # Ds is already computed above, so reuse it
+        # --- Term 2: (1/2)||Gᵀs||² = (1/2)sᵀDs ---
         term2 = 0.5 * (s * Ds).sum(dim=-1)  # [Batch]
 
-        # Term 3: -⟨A, s⟩
-        # For constant coefficients: A = f
-        # For state-dependent: A = f - (1/2)∇·(GGᵀ)
-        # We optimize for the constant case (most common)
+        # --- Term 3: -⟨A, s⟩ ---
         if self.equation.is_constant_coefficients():
-            # A = f (since ∇·D = 0 for constant D)
+            # Constant case: A = f, ∇·A = 0
             A = f
-            div_A = 0.0  # ∇·A = 0 for constant drift
+            div_A = 0.0
         else:
-            # State-dependent case: compute A = f - (1/2)∇·(GGᵀ)
-            # Warning: O(d²) autograd calls — very expensive in high dimensions.
-            # (∇·D)ᵢ = Σⱼ ∂Dᵢⱼ/∂xⱼ
+            # State-dependent case: A = f - (1/2)∇·(GGᵀ)
+            # Warning: O(d²) autograd calls — expensive in high dimensions.
             div_D = torch.zeros(batch_size, self.spatial_dim, device=self.device, dtype=s.dtype)
             for i in range(self.spatial_dim):
                 for j in range(self.spatial_dim):
@@ -197,7 +179,6 @@ class ScorePINNSolver:
 
             A = f - 0.5 * div_D  # [Batch, spatial_dim]
 
-            # ∇·A = Σⱼ ∂Aⱼ/∂xⱼ
             div_A = torch.zeros(batch_size, device=self.device, dtype=s.dtype)
             for j in range(self.spatial_dim):
                 grad_Aj = torch.autograd.grad(
@@ -210,10 +191,10 @@ class ScorePINNSolver:
 
         term3 = -(A * s).sum(dim=-1)  # [Batch]
 
-        # Term 4: -∇·A (skip for constant coefficients)
+        # --- Term 4: -∇·A ---
         term4 = -div_A if not self.equation.is_constant_coefficients() else 0.0
 
-        # L[s] = term1 + term2 + term3 + term4
+        # --- Sum terms: L[s] = term1 + term2 + term3 + term4 ---
         L_s = term1 + term2 + term3 + term4
 
         return L_s  # [Batch]
@@ -236,15 +217,15 @@ class ScorePINNSolver:
         """
         batch_size = x.shape[0]
 
-        # Enable gradients
+        # --- Enable gradients ---
         x = x.requires_grad_(True)
         t = t.requires_grad_(True)
 
-        # Compute score (concatenate x and t)
+        # --- Score network prediction ---
         xt = torch.cat([x, t], dim=-1)
         s = self.score_network(xt)  # [Batch, spatial_dim]
 
-        # Compute time derivative ∂s/∂t
+        # --- Time derivative ∂s/∂t ---
         s_t_list = []
         for i in range(self.spatial_dim):
             s_t_i = torch.autograd.grad(
@@ -257,10 +238,10 @@ class ScorePINNSolver:
 
         s_t = torch.stack(s_t_list, dim=-1)  # [Batch, spatial_dim]
 
-        # Compute L[s]
+        # --- L operator ---
         L_s = self._compute_L_operator(x, t, s)  # [Batch]
 
-        # Compute ∇x{L[s]}
+        # --- Spatial gradient ∇x{L[s]} ---
         grad_L_s = torch.autograd.grad(
             L_s.sum(),
             x,
@@ -268,10 +249,8 @@ class ScorePINNSolver:
             retain_graph=True
         )[0]  # [Batch, spatial_dim]
 
-        # Residual: ∂ts - ∇x{L[s]}
+        # --- Residual: ∂ts - ∇x{L[s]} ---
         residual = s_t - grad_L_s  # [Batch, spatial_dim]
-
-        # Return scalar residual (mean squared)
         loss = (residual ** 2).mean()
 
         return loss
@@ -288,20 +267,20 @@ class ScorePINNSolver:
         Returns:
             loss: Initial condition loss (scalar)
         """
-        # Sample initial points
+        # --- Sample initial points ---
         x_init = self._sample_initial_points(self.config.n_initial)
 
-        # Evaluate network at regularization time t_epsilon
+        # --- Evaluate network at t_epsilon ---
         t_init = torch.full((self.config.n_initial, 1), self.config.t_epsilon, device=self.device, dtype=self.dtype)
 
-        # Compute predicted score (concatenate x and t)
+        # --- Predicted score ---
         xt_init = torch.cat([x_init, t_init], dim=-1)
         s_pred = self.score_network(xt_init)  # [n_initial, spatial_dim]
 
-        # Compute true initial score from equation (at same t_epsilon)
+        # --- True initial score ---
         s_true = self.equation.initial_score(x_init, t_epsilon=self.config.t_epsilon)  # [n_initial, spatial_dim]
 
-        # MSE loss
+        # --- MSE loss ---
         loss = torch.mean((s_pred - s_true) ** 2)
 
         return loss
@@ -313,10 +292,10 @@ class ScorePINNSolver:
         Returns:
             loss: Residual loss (scalar)
         """
-        # Sample collocation points
+        # --- Collocation points ---
         x_pde, t_pde = self._sample_collocation_points(self.config.n_collocation)
 
-        # Compute residual for batch
+        # --- Batch computation ---
         total_loss = 0.0
         n_batches = (self.config.n_collocation + self.config.batch_size - 1) // self.config.batch_size
 
@@ -334,8 +313,7 @@ class ScorePINNSolver:
 
     def _sample_initial_points(self, n_points: int) -> torch.Tensor:
         """Sample points from initial distribution."""
-        # Sample from initial distribution p0(x)
-        # For now, use uniform sampling in domain
+        # --- Sample uniformly from domain ---
         if self.spatial_dim == 1:
             x = torch.rand(n_points, 1, device=self.device)
             x = x * (self.config.x_max - self.config.x_min) + self.config.x_min
@@ -347,7 +325,7 @@ class ScorePINNSolver:
 
     def _sample_collocation_points(self, n_points: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Sample collocation points in space-time domain."""
-        # Sample spatial points
+        # --- Spatial points ---
         if self.spatial_dim == 1:
             x = torch.rand(n_points, 1, device=self.device)
             x = x * (self.config.x_max - self.config.x_min) + self.config.x_min
@@ -355,10 +333,10 @@ class ScorePINNSolver:
             x = torch.rand(n_points, self.spatial_dim, device=self.device)
             x = x * (self.config.x_max - self.config.x_min) + self.config.x_min
 
-        # Sample time points (avoid t=0 for PDE residual)
+        # --- Time points (avoid t=0 for PDE residual) ---
         t = torch.rand(n_points, 1, device=self.device)
         t = t * (self.config.t_max - self.config.t_min) + self.config.t_min
-        t = torch.clamp(t, min=1e-6)  # Avoid t=0
+        t = torch.clamp(t, min=1e-6)
 
         return x, t
 
@@ -375,37 +353,36 @@ class ScorePINNSolver:
         Returns:
             history: Training history
         """
-        # Setup optimizer and scheduler
+        # --- Optimizer setup ---
         self.optimizer = setup_optimizer(self.score_network.parameters(), training_config)
         self.scheduler = setup_scheduler(self.optimizer, training_config)
 
-        # Training header
+        # --- Training header ---
         start_time = time.time()
         if training_config.verbose:
             print(f"\n{'Epoch':<12} {'Total':<12} {'Initial':<12} {'Residual':<12} {'LR':<12} {'Time':<12}")
             print("-" * 72)
 
-        # Training loop
         for epoch in range(training_config.epochs):
             self.optimizer.zero_grad()
 
-            # Compute losses
+            # --- Compute losses ---
             loss_initial = self._compute_initial_condition_loss()
             loss_residual = self._compute_residual_loss()
 
-            # Total loss
+            # --- Weighted total ---
             loss_total = (
                 self.config.lambda_initial * loss_initial +
                 self.config.lambda_residual * loss_residual
             )
 
-            # Backward pass
+            # --- Backward pass ---
             loss_total.backward()
 
-            # Compute gradient norm (before clipping)
+            # --- Gradient norm ---
             total_grad_norm = compute_gradient_norm(self.score_network.parameters())
 
-            # Gradient clipping
+            # --- Gradient clipping ---
             if training_config.gradient_clip_val is not None:
                 torch.nn.utils.clip_grad_norm_(
                     self.score_network.parameters(),
@@ -414,20 +391,20 @@ class ScorePINNSolver:
 
             self.optimizer.step()
 
-            # Update scheduler
+            # --- LR scheduler ---
             if training_config.lr_scheduler == 'step':
                 self.scheduler.step()
             elif training_config.lr_scheduler == 'plateau':
                 self.scheduler.step(loss_total)
 
-            # Record history
+            # --- Update history ---
             self.history['loss_total'].append(loss_total.item())
             self.history['loss_initial'].append(loss_initial.item())
             self.history['loss_residual'].append(loss_residual.item())
             self.history['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
             self.history['grad_norm'].append(total_grad_norm)
 
-            # Periodic logging
+            # --- Logging ---
             if training_config.verbose and epoch % training_config.log_interval == 0:
                 elapsed = time.time() - start_time
                 it_per_sec = (epoch + 1) / elapsed if elapsed > 0 else 0
@@ -443,7 +420,7 @@ class ScorePINNSolver:
                     f"{time_str:<12}"
                 )
 
-        # Final summary
+        # --- Final summary ---
         if training_config.verbose:
             total_time = time.time() - start_time
             print("-" * 72)
@@ -473,7 +450,7 @@ class ScorePINNSolver:
         """
         self.score_network.eval()
         with torch.no_grad():
-            # Concatenate x and t
+            # --- Forward pass ---
             xt = torch.cat([x, t], dim=-1)
             score = self.score_network(xt)
         return score

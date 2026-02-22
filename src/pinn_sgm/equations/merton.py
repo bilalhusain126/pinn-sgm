@@ -1,8 +1,18 @@
 """
-Fokker-Planck equation implementations for financial models.
+Merton structural model: Fokker-Planck PDE and SDE implementations.
 
-This module implements the Fokker-Planck equation (FPE) governing the evolution
-of probability density functions for stochastic processes.
+The multivariate Merton model assumes a constant-coefficient linear SDE:
+    dX_t = μ dt + Σ dW_t
+
+The probability density p(x, t) of X_t satisfies the Fokker-Planck equation:
+    ∂p/∂t + μ·∇p - (1/2) ∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ = 0
+
+where D = ΣΣᵀ is the diffusion matrix.  Starting from a point mass at x₀,
+the density is Gaussian for all t > 0:
+    p(x, t) = 𝒩(x; x₀ + μt, Dt)
+
+This closed-form solution makes the Merton model an ideal test bed for
+PINN and Score-PINN solvers.
 """
 
 from typing import Optional
@@ -65,7 +75,7 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         # both set the same attributes.
         BasePDE.__init__(self, spatial_dim=spatial_dim, device=device, dtype=dtype)
 
-        # Process drift vector μ
+        # --- Drift vector μ ---
         if mu is None:
             mu = 0.0
         if np.isscalar(mu):
@@ -77,7 +87,7 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
 
         self.mu = torch.tensor(mu, dtype=dtype, device=device)
 
-        # Process volatility matrix Σ
+        # --- Volatility matrix Σ ---
         if sigma is None:
             sigma = 1.0
         if np.isscalar(sigma):
@@ -101,10 +111,10 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
 
         self.sigma = torch.tensor(sigma, dtype=dtype, device=device)
 
-        # Compute diffusion matrix D = ΣΣᵀ
+        # --- Diffusion matrix D = ΣΣᵀ ---
         self.D = torch.matmul(self.sigma, self.sigma.T)
 
-        # Process initial state x₀
+        # --- Initial state x₀ ---
         if x0 is None:
             x0 = 0.0
         if np.isscalar(x0):
@@ -142,19 +152,14 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         Returns:
             PDE residual [Batch, 1]
         """
-        # Drift term: μ·∇p
-        # u_x shape: [Batch, spatial_dim]
-        # mu shape: [spatial_dim]
+        # --- Drift term: μ·∇p ---
         drift_term = torch.sum(self.mu * u_x, dim=-1, keepdim=True)  # [Batch, 1]
 
-        # Diffusion term: (1/2) ∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ
-        # u_xx shape: [Batch, spatial_dim, spatial_dim]
-        # D shape: [spatial_dim, spatial_dim]
-        # Contract: ∑ᵢⱼ Dᵢⱼ Hᵢⱼ = Tr(D @ H^T) = Tr(D @ H) (since H is symmetric)
-        diffusion_term = torch.einsum('ij,bij->b', self.D, u_xx).unsqueeze(-1)  # [Batch, 1]
-        diffusion_term = 0.5 * diffusion_term
+        # --- Diffusion term: (1/2) ∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ ---
+        # Contract: ∑ᵢⱼ Dᵢⱼ Hᵢⱼ = Tr(D H) since H is symmetric
+        diffusion_term = 0.5 * torch.einsum('ij,bij->b', self.D, u_xx).unsqueeze(-1)  # [Batch, 1]
 
-        # Residual: ∂p/∂t + μ·∇p - (1/2)∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ
+        # --- PDE residual: ∂p/∂t + μ·∇p - (1/2)∑ᵢⱼ Dᵢⱼ ∂²p/∂xᵢ∂xⱼ ---
         residual = u_t + drift_term - diffusion_term
 
         return residual
@@ -201,39 +206,30 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         Returns:
             Analytical density [Batch, 1]
         """
-        # Ensure proper shapes
+        # --- Shapes ---
         if x.dim() == 1:
             x = x.unsqueeze(0)  # [1, spatial_dim]
         if t.dim() == 1:
             t = t.unsqueeze(-1)  # [Batch, 1]
 
-        # Avoid t=0
         t_clamped = torch.clamp(t, min=1e-6)
-
         batch_size = x.shape[0]
 
-        # Time-evolved mean and covariance (per-sample)
+        # --- Mean and covariance: μ_t = x₀ + μt, Cov_t = Dt ---
         mu_t = self.x0 + self.mu * t_clamped  # [Batch, spatial_dim]
-
-        # Compute per-sample covariance: cov_t[b] = D * t[b]
-        # Reshape t for proper broadcasting: [Batch, 1] -> [Batch, 1, 1]
-        t_expanded = t_clamped.view(batch_size, 1, 1)  # [Batch, 1, 1]
-        # Expand D to batch dimension: [spatial_dim, spatial_dim] -> [Batch, spatial_dim, spatial_dim]
+        t_expanded = t_clamped.view(batch_size, 1, 1)
         cov_t = self.D.unsqueeze(0) * t_expanded  # [Batch, spatial_dim, spatial_dim]
-
-        # Multivariate Gaussian PDF
-        # p(x) = (2π)^(-n/2) |Σ|^(-1/2) exp(-1/2 (x-μ)ᵀ Σ⁻¹ (x-μ))
 
         diff = x - mu_t  # [Batch, spatial_dim]
 
-        # Compute determinant and inverse of covariance matrix (batched)
+        # --- Covariance inverse and determinant ---
         det_cov = torch.linalg.det(cov_t)  # [Batch]
         inv_cov = torch.linalg.inv(cov_t)  # [Batch, spatial_dim, spatial_dim]
 
-        # Mahalanobis distance: (x-μ)ᵀ Σ⁻¹ (x-μ) (batched)
+        # --- Mahalanobis distance ---
         mahal = torch.einsum('bi,bij,bj->b', diff, inv_cov, diff)  # [Batch]
 
-        # Gaussian PDF
+        # --- Gaussian PDF ---
         coeff = 1.0 / torch.sqrt((2 * np.pi) ** self.spatial_dim * det_cov)
         p = coeff * torch.exp(-0.5 * mahal)
 
@@ -296,16 +292,13 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         Returns:
             Initial score s₀(x) [Batch, spatial_dim]
         """
-        # Ensure proper shape
         if x.dim() == 1:
             x = x.unsqueeze(0)
 
         batch_size = x.shape[0]
 
-        # Evaluate at small time to regularize Dirac delta
+        # --- Evaluate at t_epsilon to regularize Dirac delta ---
         t_small = torch.full((batch_size, 1), t_epsilon, device=self.device, dtype=self.dtype)
-
-        # Use analytical score at small time
         return self.analytical_score(x, t_small)
 
     def analytical_score(
@@ -327,30 +320,24 @@ class FokkerPlanckMertonND(BasePDE, BaseSDE):
         Returns:
             Score vectors [Batch, spatial_dim]
         """
-        # Ensure proper shapes
+        # --- Shapes ---
         if x.dim() == 1:
             x = x.unsqueeze(0)
         if t.dim() == 1:
             t = t.unsqueeze(-1)
 
-        # Avoid t=0
         t_clamped = torch.clamp(t, min=1e-6)
-
         batch_size = x.shape[0]
 
-        # Time-evolved mean and covariance (per-sample)
+        # --- Mean and covariance: μ_t = x₀ + μt, Cov_t = Dt ---
         mu_t = self.x0 + self.mu * t_clamped  # [Batch, spatial_dim]
-
-        # Compute per-sample covariance: cov_t[b] = D * t[b]
-        # Reshape t for proper broadcasting: [Batch, 1] -> [Batch, 1, 1]
-        t_expanded = t_clamped.view(batch_size, 1, 1)  # [Batch, 1, 1]
-        # Expand D to batch dimension: [spatial_dim, spatial_dim] -> [Batch, spatial_dim, spatial_dim]
+        t_expanded = t_clamped.view(batch_size, 1, 1)
         cov_t = self.D.unsqueeze(0) * t_expanded  # [Batch, spatial_dim, spatial_dim]
 
-        # Compute inverse covariance (batched)
+        # --- Inverse covariance ---
         inv_cov = torch.linalg.inv(cov_t)  # [Batch, spatial_dim, spatial_dim]
 
-        # Score: s(x, t) = -Σ⁻¹(x - μ_t) (batched)
+        # --- Score computation: s = -(Dt)⁻¹(x - μ_t) ---
         diff = x - mu_t  # [Batch, spatial_dim]
         score = -torch.einsum('bij,bj->bi', inv_cov, diff)  # [Batch, spatial_dim]
 
