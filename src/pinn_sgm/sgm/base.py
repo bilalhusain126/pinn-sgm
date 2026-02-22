@@ -43,10 +43,6 @@ class ForwardSDE(BaseSDE):
     a closed-form sampler for efficiency.
     """
 
-    # ------------------------------------------------------------------
-    # SGM-specific abstract interface
-    # ------------------------------------------------------------------
-
     @abstractmethod
     def marginal_score(
         self,
@@ -88,10 +84,6 @@ class ForwardSDE(BaseSDE):
         Returns:
             Noisy sample x(t) [B, d]
         """
-
-    # ------------------------------------------------------------------
-    # Concrete utility — generic Euler-Maruyama path simulator
-    # ------------------------------------------------------------------
 
     def simulate_paths(
         self,

@@ -56,10 +56,6 @@ class MertonSDE(ForwardSDE):
         # D = LLᵀ  ⟹  Dt = (L√t)(L√t)ᵀ
         self._L = torch.linalg.cholesky(self._D)  # [d, d]
 
-    # ------------------------------------------------------------------
-    # BaseSDE interface (drift / diffusion / initial_score / analytical_score)
-    # ------------------------------------------------------------------
-
     def drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Constant drift μ broadcast to batch."""
         return self.equation.drift(x, t)
@@ -75,10 +71,6 @@ class MertonSDE(ForwardSDE):
     def analytical_score(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Delegate to equation: ∇ log p(x, t) assuming p_0 = δ(x − x₀)."""
         return self.equation.analytical_score(x, t)
-
-    # ------------------------------------------------------------------
-    # ForwardSDE interface (marginal_score / sample_marginal)
-    # ------------------------------------------------------------------
 
     def marginal_score(
         self,
@@ -143,10 +135,6 @@ class MertonSDE(ForwardSDE):
 
         z = torch.randn(B, self.spatial_dim, device=self.device, dtype=self.dtype)
         return mean_t + torch.einsum('bij,bj->bi', L_t, z)        # [B, d]
-
-    # ------------------------------------------------------------------
-    # Override simulate_paths with closed-form Gaussian increments
-    # ------------------------------------------------------------------
 
     def simulate_paths(
         self,
