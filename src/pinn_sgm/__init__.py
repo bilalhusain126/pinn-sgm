@@ -57,6 +57,7 @@ from . import solvers
 from . import nets
 from . import utils
 from . import sgm
+from . import calibration
 
 __all__ = [
     'config',
@@ -65,5 +66,6 @@ __all__ = [
     'nets',
     'utils',
     'sgm',
+    'calibration',
     'setup_logging',
 ]
